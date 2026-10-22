@@ -1,7 +1,11 @@
 """
 Combined Directional Residuals & Frequency-Antagonistic Association Loop
-===================================================================================
-Updated with adaptive support thresholds to prevent 'insufficient' labels on shorter inputs.
+======================================================================
+Merges directional n-gram models with a frequency-antagonistic association
+matrix. Operates in an interactive loop allowing dynamic text entry and manual
+frequency threshold input prior to matrix construction.
+
+Only dependency: NumPy
 """
 
 import math
@@ -27,6 +31,7 @@ def tokenize(text: str) -> List[str]:
 
 
 class NGramModel:
+    """Smoothed n-gram model with backoff to shorter contexts."""
     reverse = False
 
     def __init__(self, order: int = 3, alpha: float = 0.25):
@@ -87,10 +92,12 @@ class NGramModel:
 
 
 class ReverseNGramModel(NGramModel):
+    """The same corpus read right to left."""
     reverse = True
 
 
 def chain_logprob(model: NGramModel, seq: Sequence[str]) -> float:
+    """Chain-rule log-probability of seq."""
     total = model.log_unigram(seq[0])
     for i in range(1, len(seq)):
         total += model.logprob(seq[:i], seq[i])
@@ -112,63 +119,63 @@ def compute_directional_residuals(fwd: NGramModel, bwd: NGramModel, level: int, 
     return rows
 
 
-def build_frequency_antagonistic_matrix(
-    X,
-    feature_names=None,
-    min_support=1,  # Lowered default to 1 to accommodate short texts
-    min_abs_lift_deviation=0.01,
-    smoothing=1.0,
-):
-    X = np.asarray(X, dtype=np.uint8)
+def build_frequency_antagonistic_matrix(X, feature_names=None, user_frequency_baseline=1.0):
+    """
+    Builds a frequency-antagonistic matrix incorporating frequency-based
+    counts and dynamic status thresholds sensitive to subtle text shifts.
+    """
+    X = np.asarray(X, dtype=float)
     n, m = X.shape
     names = list(feature_names or [f"F{i}" for i in range(m)])
 
     score = np.zeros((m, m), dtype=float)
-    probability = np.full((m, m), np.nan, dtype=float)
-    support = np.zeros((m, m), dtype=int)
-    status = np.full((m, m), "diagonal", dtype=object)
+    support = np.zeros((m, m), dtype=float)
+    status = np.full((m, m), "balanced", dtype=object)
 
     rates = X.mean(axis=0)
-    antagonistic_weights = 1.0 / (1.0 + np.log(1.0 + rates * n))
 
     for i in range(m):
         for j in range(i + 1, m):
-            both = int(np.sum(X[:, i] & X[:, j]))
-            count_i = int(X[:, i].sum())
-            count_j = int(X[:, j].sum())
-            support[i, j] = support[j, i] = both
+            # Use dot product or minimum intersection over continuous counts for support
+            co_occur = np.sum(np.minimum(X[:, i], X[:, j]))
+            support[i, j] = support[j, i] = co_occur
 
-            p_j_given_i = (both + smoothing * rates[j]) / (count_i + smoothing) if count_i + smoothing else rates[j]
-            probability[i, j] = p_j_given_i
+            f_i = rates[i]
+            f_j = rates[j]
 
-            expected = rates[i] * rates[j]
-            observed = both / n
-            denom = min(expected, rates[i] * (1 - rates[j]), rates[j] * (1 - rates[i]),
-                        (1 - rates[i]) * (1 - rates[j]))
-            raw = (observed - expected) / denom if denom > 0 else 0.0
-            raw = float(np.clip(raw, -1.0, 1.0))
+            if f_i + f_j > 0:
+                freq_friction = abs(f_i - f_j) / (f_i + f_j + float(user_frequency_baseline))
+                co_occurrence_ratio = co_occur / max(1, n)
 
-            antagonism_factor = (antagonistic_weights[i] + antagonistic_weights[j]) / 2.0
-            adjusted_score = raw * antagonism_factor
-
-            score[i, j] = score[j, i] = adjusted_score
-
-            effect = abs(p_j_given_i - rates[j])
-            if both < min_support:
-                label = "insufficient"
-            elif effect < min_abs_lift_deviation:
-                label = "non_assoc"
+                antag_val = (co_occurrence_ratio - (f_i * f_j)) * (1.0 + freq_friction)
             else:
-                label = "antag_pos" if adjusted_score > 0 else "antag_neg"
-            status[i, j] = status[j, i] = label
+                antag_val = 0.0
+
+            score[i, j] = score[j, i] = antag_val
+
+    # Compute dynamic thresholds based on score distribution variance
+    non_zero_scores = score[score != 0]
+    spread_threshold = max(1e-5, float(np.std(non_zero_scores) * 0.25)) if non_zero_scores.size > 0 else 0.05
+
+    for i in range(m):
+        for j in range(i + 1, m):
+            both = support[i, j]
+            val = score[i, j]
+
+            if both == 0:
+                status[i, j] = status[j, i] = "orthogonal"
+            elif val > spread_threshold:
+                status[i, j] = status[j, i] = "antag_synergy"
+            elif val < -spread_threshold:
+                status[i, j] = status[j, i] = "antag_friction"
+            else:
+                status[i, j] = status[j, i] = "neutral"
 
     return {
         "names": names,
         "score": score,
-        "conditional_probability": probability,
         "support": support,
         "status": status,
-        "antagonistic_weights": antagonistic_weights,
     }
 
 
@@ -176,7 +183,7 @@ def fmt_seq(seq: Tuple[str, ...]) -> str:
     return " ".join(seq[:-1]) + "  ->  " + seq[-1]
 
 
-def print_matrix(title, matrix, names, fmt="{:>9.2f}"):
+def print_matrix(title, matrix, names, fmt="{:>9.3f}"):
     print("\n" + title)
     print(" " * 12 + " ".join(f"{name:>9}" for name in names))
     for name, row in zip(names, matrix):
@@ -191,9 +198,9 @@ def print_matrix(title, matrix, names, fmt="{:>9.2f}"):
         print(f"{name:>10}  " + " ".join(cells))
 
 
-def main():
+def main() -> None:
     print("=" * 75)
-    print(" DIRECTIONAL RESIDUALS & FREQUENCY-ANTAGONISTIC ASSOCIATION LOOP")
+    print(" DIRECTIONAL RESIDUALS & FREQUENCY-ANTAGONISTIC LOOP")
     print("=" * 75)
     print("Type text to analyze. Type 'quit' or 'exit' to terminate.\n")
 
@@ -213,6 +220,7 @@ def main():
             current_corpus = user_input
             print(f"-> Corpus updated ({len(tokenize(current_corpus))} tokens).")
 
+        # 1. Train Forward & Reverse N-Gram Models
         fwd = NGramModel(order=3, alpha=0.25)
         fwd.train(current_corpus)
         bwd = ReverseNGramModel(order=3, alpha=0.25)
@@ -227,33 +235,49 @@ def main():
         print(f"\n--- DIRECTIONAL RESIDUALS SUMMARY ---")
         print(f"Events: {len(rows)} | Mean |Residual|: {np.abs(r).mean():.3f} | Max |Residual|: {np.abs(r).max():.3f}")
 
-        # Build vocabulary items (take top 8 most frequent words)
+        ordered = sorted(rows, key=lambda x: x[4])
+        print("\nTop Negative Residuals (Forward-dominant mass):")
+        print(f"  {fmt_seq(ordered[0][0]):<35} n={ordered[0][1]:<2d} res={ordered[0][4]:+.3f}")
+
+        print("\nTop Positive Residuals (Reverse-dominant mass):")
+        print(f"  {fmt_seq(ordered[-1][0]):<35} n={ordered[-1][1]:<2d} res={ordered[-1][4]:+.3f}")
+
+        # 2. Prompt user for frequency input BEFORE building the matrix
+        print("\n--- MATRIX CONFIGURATION ---")
+        freq_input = input("[Enter frequency baseline/threshold value for the matrix, e.g., 1.0]: ").strip()
+        try:
+            user_frequency_baseline = float(freq_input) if freq_input else 1.0
+        except ValueError:
+            print("[Invalid number entered; defaulting to 1.0]")
+            user_frequency_baseline = 1.0
+
+        # 3. Vocabulary & Frequency-Antagonistic Matrix Construction (Count-accumulating X)
         vocab_items = [token.lower() for token, freq in fwd.vocab.most_common(8) if token not in ("<bos>", "<eos>")]
         if len(vocab_items) < 2:
             vocab_items = list(fwd.vocab.keys())[:5]
 
-        # Break text into sliding windows / sentences
         sentences = [tokenize(s) for s in re.split(r'[.!?\n]+', current_corpus) if s.strip()]
         if len(sentences) < 2:
-            # If text is a single continuous block, chunk it into synthetic windows of 5 words
             words = tokenize(current_corpus)
-            chunk_size = max(3, len(words) // 4)
+            chunk_size = max(2, len(words) // 4)
             sentences = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
 
-        X = np.zeros((len(sentences), len(vocab_items)), dtype=np.uint8)
+        X = np.zeros((len(sentences), len(vocab_items)), dtype=float)
         token_to_idx = {tok: i for i, tok in enumerate(vocab_items)}
         for s_idx, sent in enumerate(sentences):
-            sent_set = {t.lower() for t in sent}
-            for tok in sent_set:
-                if tok in token_to_idx:
-                    X[s_idx, token_to_idx[tok]] = 1
+            for tok in sent:
+                t_lower = tok.lower()
+                if t_lower in token_to_idx:
+                    X[s_idx, token_to_idx[t_lower]] += 1.0
 
         if X.shape[0] >= 2 and X.shape[1] >= 2:
-            matrix_out = build_frequency_antagonistic_matrix(X, feature_names=vocab_items, min_support=1, min_abs_lift_deviation=0.001)
-            print_matrix("Frequency-Antagonistic Association Matrix [-1, +1]", matrix_out["score"], vocab_items)
+            matrix_out = build_frequency_antagonistic_matrix(
+                X, feature_names=vocab_items, user_frequency_baseline=user_frequency_baseline
+            )
+            print_matrix(f"Frequency-Antagonistic Matrix (Baseline={user_frequency_baseline})", matrix_out["score"], vocab_items)
             print_matrix("Antagonistic Status Matrix", matrix_out["status"], vocab_items, fmt="{}")
         else:
-            print("\n[Notice: Insufficient text variability to build association matrix.]")
+            print("\n[Notice: Insufficient text length for full matrix generation.]")
 
 
 if __name__ == "__main__":
