@@ -39,7 +39,6 @@ def build_non_association_matrix(
         raise ValueError("smoothing must be non-negative.")
 
     # Pairwise outputs:
-    # score: +1 positive association, -1 negative association, near 0 independence.
     score = np.zeros((m, m), dtype=float)
     probability = np.full((m, m), np.nan, dtype=float)
     lift = np.full((m, m), np.nan, dtype=float)
@@ -65,7 +64,6 @@ def build_non_association_matrix(
             # Symmetric association effect: observed joint rate vs expected joint rate.
             expected = rates[i] * rates[j]
             observed = both / n
-            # Difference normalized by maximum possible magnitude for a bounded [-1, 1] score.
             denom = min(expected, rates[i] * (1 - rates[j]), rates[j] * (1 - rates[i]),
                         (1 - rates[i]) * (1 - rates[j]))
             if denom > 0:
@@ -103,7 +101,6 @@ def build_non_association_matrix(
             status[i, j] = status[j, i] = label
 
     # Programmable higher-order rules adjust a separate directed matrix.
-    # They do not overwrite raw pairwise evidence.
     rule_matrix = np.zeros((m, m), dtype=float)
     rule_log = []
     for rule in (rules or []):
@@ -123,7 +120,6 @@ def build_non_association_matrix(
             delta = 0.0
         else:
             observed_prob = float(X[active, index[target]].mean())
-            # Programmable chance is the user's expected probability under the null.
             delta = float(np.clip((observed_prob - chance) * weight, -1.0, 1.0))
             rule_matrix[cols, index[target]] += delta
         rule_log.append({
@@ -168,7 +164,24 @@ if __name__ == "__main__":
     rng = np.random.default_rng(7)
     n = 600
     names = ["A", "B", "C", "D", "E", "F"]
-    X = (rng.random((n, len(names))) < [0.35, 0.30, 0.25, 0.20, 0.18, 0.12]).astype(np.uint8)
+    
+    # Allow periodicity to be entered via interactive input
+    user_input = input("Enter periodicity (number of steps per cycle, default 50): ").strip()
+    try:
+        period = float(user_input) if user_input else 50.0
+        if period <= 0:
+            raise ValueError()
+    except ValueError:
+        print("Invalid input or non-positive value. Falling back to default period = 50.0")
+        period = 50.0
+
+    # Generate baseline probabilities modulated by the user-entered periodicity
+    time_steps = np.arange(n)[:, None]
+    base_probs = np.array([0.35, 0.30, 0.25, 0.20, 0.18, 0.12])
+    # Apply sinusoidal periodic modulation across rows
+    modulated_probs = np.clip(base_probs + 0.1 * np.sin(2 * np.pi * time_steps / period), 0.05, 0.95)
+    
+    X = (rng.random((n, len(names))) < modulated_probs).astype(np.uint8)
 
     # Plant a degree-2 association: when A and B are both active, C is likely.
     trigger = X[:, 0].astype(bool) & X[:, 1].astype(bool)
@@ -186,6 +199,8 @@ if __name__ == "__main__":
         X, names, rules=programmable_rules, min_support=5,
         min_abs_lift_deviation=0.05, smoothing=1.0, permutations=200
     )
+    
+    print(f"\nUsing periodicity (cycle length) = {period}")
     print_matrix("Pairwise signed association matrix [-1, +1]", out["score"], names)
     print_matrix("Pairwise status matrix", out["status"], names, fmt="{}")
     print_matrix("Conditional probability matrix P(column | row)",
