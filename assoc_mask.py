@@ -2,8 +2,7 @@
 Combined Directional Residuals & Frequency-Antagonistic Association Loop
 ======================================================================
 Merges directional n-gram models with a frequency-antagonistic association
-matrix. Operates in an interactive loop allowing dynamic text entry and manual
-frequency threshold input prior to matrix construction.
+matrix, incorporating word-length weighting and dynamic thresholds.
 
 Only dependency: NumPy
 """
@@ -121,8 +120,8 @@ def compute_directional_residuals(fwd: NGramModel, bwd: NGramModel, level: int, 
 
 def build_frequency_antagonistic_matrix(X, feature_names=None, user_frequency_baseline=1.0):
     """
-    Builds a frequency-antagonistic matrix incorporating frequency-based
-    counts and dynamic status thresholds sensitive to subtle text shifts.
+    Builds a frequency-antagonistic matrix incorporating length-weighted
+    features and structural word-length friction.
     """
     X = np.asarray(X, dtype=float)
     n, m = X.shape
@@ -135,8 +134,10 @@ def build_frequency_antagonistic_matrix(X, feature_names=None, user_frequency_ba
     rates = X.mean(axis=0)
 
     for i in range(m):
+        len_i = len(names[i])
         for j in range(i + 1, m):
-            # Use dot product or minimum intersection over continuous counts for support
+            len_j = len(names[j])
+            
             co_occur = np.sum(np.minimum(X[:, i], X[:, j]))
             support[i, j] = support[j, i] = co_occur
 
@@ -145,15 +146,18 @@ def build_frequency_antagonistic_matrix(X, feature_names=None, user_frequency_ba
 
             if f_i + f_j > 0:
                 freq_friction = abs(f_i - f_j) / (f_i + f_j + float(user_frequency_baseline))
+                length_friction = abs(len_i - len_j) / (len_i + len_j + 1.0)
+                
                 co_occurrence_ratio = co_occur / max(1, n)
 
-                antag_val = (co_occurrence_ratio - (f_i * f_j)) * (1.0 + freq_friction)
+                # Combine frequency antagonism with word-length structural friction
+                antag_val = (co_occurrence_ratio - (f_i * f_j)) * (1.0 + freq_friction + 0.5 * length_friction)
             else:
                 antag_val = 0.0
 
             score[i, j] = score[j, i] = antag_val
 
-    # Compute dynamic thresholds based on score distribution variance
+    # Dynamic thresholding based on score distribution variance
     non_zero_scores = score[score != 0]
     spread_threshold = max(1e-5, float(np.std(non_zero_scores) * 0.25)) if non_zero_scores.size > 0 else 0.05
 
@@ -251,7 +255,7 @@ def main() -> None:
             print("[Invalid number entered; defaulting to 1.0]")
             user_frequency_baseline = 1.0
 
-        # 3. Vocabulary & Frequency-Antagonistic Matrix Construction (Count-accumulating X)
+        # 3. Vocabulary & Frequency-Antagonistic Matrix Construction (Length-weighted X)
         vocab_items = [token.lower() for token, freq in fwd.vocab.most_common(8) if token not in ("<bos>", "<eos>")]
         if len(vocab_items) < 2:
             vocab_items = list(fwd.vocab.keys())[:5]
@@ -268,7 +272,8 @@ def main() -> None:
             for tok in sent:
                 t_lower = tok.lower()
                 if t_lower in token_to_idx:
-                    X[s_idx, token_to_idx[t_lower]] += 1.0
+                    # Weight matrix incidence by character length of the word
+                    X[s_idx, token_to_idx[t_lower]] += float(len(t_lower))
 
         if X.shape[0] >= 2 and X.shape[1] >= 2:
             matrix_out = build_frequency_antagonistic_matrix(
