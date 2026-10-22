@@ -1,43 +1,14 @@
 """
-Directional residuals of a forward vs time-reversed n-gram model
-================================================================
-
-Mapping only. For an observed n-gram (c -> t at level 1, a b -> t at level 2) the model can
-score the SAME joint event two ways, by the chain rule:
-
-  forward  : log U(c) + log Pf(t | c)              (level 2: log U(a) + log Pf(b|a) + log Pf(t|a,b))
-  backward : log U(t) + log Pb(c | t)              (level 2: log U(t) + log Pb(b|t) + log Pb(a|b,t))
-
-  residual = backward - forward
-
-For raw counts the two factorizations are identical (both equal n(event)/N), so the residual
-is exactly 0: a counting model has no intrinsic arrow of time. Whatever residual remains is
-what the estimator adds: additive smoothing, backoff weighting, and boundary tokens. That makes
-the residual a map of where the model's forward and backward views disagree, and it should
-shrink as evidence grows. The table by observation count tests exactly that.
-
-  positive residual : the reversed reading gives the event more mass than the forward reading
-  negative residual : the forward reading gives it more mass
-
-Boundary tokens (<bos>, <eos>) are excluded by default because their asymmetry is structural.
-
-Examples:
-  python directional_residuals.py corpus.txt
-  python directional_residuals.py corpus.txt --level 2 --order 3 --top 12
-  python directional_residuals.py corpus.txt --alpha 0.01        # less smoothing -> smaller residual
-  python directional_residuals.py corpus.txt --boundaries
-
-Only dependency: NumPy
+Combined Directional Residuals & Frequency-Antagonistic Association Loop
+===================================================================================
+Updated with adaptive support thresholds to prevent 'insufficient' labels on shorter inputs.
 """
 
-import argparse
 import math
 import re
 import sys
 from collections import Counter, defaultdict
-from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
-
 import numpy as np
 
 TOKEN_RE = re.compile(r"[A-Za-z]+(?:['\u2019][A-Za-z]+)*|\d+(?:\.\d+)?|[^\w\s]", re.UNICODE)
@@ -56,8 +27,6 @@ def tokenize(text: str) -> List[str]:
 
 
 class NGramModel:
-    """Smoothed n-gram model with backoff to shorter contexts."""
-
     reverse = False
 
     def __init__(self, order: int = 3, alpha: float = 0.25):
@@ -118,20 +87,17 @@ class NGramModel:
 
 
 class ReverseNGramModel(NGramModel):
-    """The same corpus read right to left."""
     reverse = True
 
 
 def chain_logprob(model: NGramModel, seq: Sequence[str]) -> float:
-    """Chain-rule log-probability of seq: log U(seq[0]) + sum log P(seq[i] | seq[:i])."""
     total = model.log_unigram(seq[0])
     for i in range(1, len(seq)):
         total += model.logprob(seq[:i], seq[i])
     return total
 
 
-def directional_residuals(fwd: NGramModel, bwd: NGramModel, level: int, boundaries: bool):
-    """Rows of (context+target tuple, observation count, forward, backward, residual)."""
+def compute_directional_residuals(fwd: NGramModel, bwd: NGramModel, level: int, boundaries: bool):
     rows = []
     for ctx, targets in fwd.counts[level].items():
         if not boundaries and "<bos>" in ctx:
@@ -146,69 +112,148 @@ def directional_residuals(fwd: NGramModel, bwd: NGramModel, level: int, boundari
     return rows
 
 
-def fmt(seq: Tuple[str, ...]) -> str:
+def build_frequency_antagonistic_matrix(
+    X,
+    feature_names=None,
+    min_support=1,  # Lowered default to 1 to accommodate short texts
+    min_abs_lift_deviation=0.01,
+    smoothing=1.0,
+):
+    X = np.asarray(X, dtype=np.uint8)
+    n, m = X.shape
+    names = list(feature_names or [f"F{i}" for i in range(m)])
+
+    score = np.zeros((m, m), dtype=float)
+    probability = np.full((m, m), np.nan, dtype=float)
+    support = np.zeros((m, m), dtype=int)
+    status = np.full((m, m), "diagonal", dtype=object)
+
+    rates = X.mean(axis=0)
+    antagonistic_weights = 1.0 / (1.0 + np.log(1.0 + rates * n))
+
+    for i in range(m):
+        for j in range(i + 1, m):
+            both = int(np.sum(X[:, i] & X[:, j]))
+            count_i = int(X[:, i].sum())
+            count_j = int(X[:, j].sum())
+            support[i, j] = support[j, i] = both
+
+            p_j_given_i = (both + smoothing * rates[j]) / (count_i + smoothing) if count_i + smoothing else rates[j]
+            probability[i, j] = p_j_given_i
+
+            expected = rates[i] * rates[j]
+            observed = both / n
+            denom = min(expected, rates[i] * (1 - rates[j]), rates[j] * (1 - rates[i]),
+                        (1 - rates[i]) * (1 - rates[j]))
+            raw = (observed - expected) / denom if denom > 0 else 0.0
+            raw = float(np.clip(raw, -1.0, 1.0))
+
+            antagonism_factor = (antagonistic_weights[i] + antagonistic_weights[j]) / 2.0
+            adjusted_score = raw * antagonism_factor
+
+            score[i, j] = score[j, i] = adjusted_score
+
+            effect = abs(p_j_given_i - rates[j])
+            if both < min_support:
+                label = "insufficient"
+            elif effect < min_abs_lift_deviation:
+                label = "non_assoc"
+            else:
+                label = "antag_pos" if adjusted_score > 0 else "antag_neg"
+            status[i, j] = status[j, i] = label
+
+    return {
+        "names": names,
+        "score": score,
+        "conditional_probability": probability,
+        "support": support,
+        "status": status,
+        "antagonistic_weights": antagonistic_weights,
+    }
+
+
+def fmt_seq(seq: Tuple[str, ...]) -> str:
     return " ".join(seq[:-1]) + "  ->  " + seq[-1]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Map the directional residual between a forward and a time-reversed n-gram model.")
-    parser.add_argument("corpus", default="xaa", nargs="?", help="UTF-8 text corpus file; uses a small built-in corpus if the default file is absent.")
-    parser.add_argument("--level", type=int, choices=[1, 2], default=1, help="Context length of the events compared (1 = bigrams, 2 = trigrams).")
-    parser.add_argument("--order", type=int, default=4, help="N-gram order of both models (must exceed --level).")
-    parser.add_argument("--alpha", type=float, default=0.25, help="Additive smoothing value.")
-    parser.add_argument("--top", type=int, default=8, help="Rows shown per list.")
-    parser.add_argument("--boundaries", action="store_true", help="Include events touching <bos>/<eos>.")
-    args = parser.parse_args()
+def print_matrix(title, matrix, names, fmt="{:>9.2f}"):
+    print("\n" + title)
+    print(" " * 12 + " ".join(f"{name:>9}" for name in names))
+    for name, row in zip(names, matrix):
+        cells = []
+        for value in row:
+            if isinstance(value, str):
+                cells.append(f"{value[:9]:>9}")
+            elif np.isnan(value):
+                cells.append(f"{'--':>9}")
+            else:
+                cells.append(fmt.format(value))
+        print(f"{name:>10}  " + " ".join(cells))
 
-    if args.order <= args.level:
-        parser.error("--order must be greater than --level")
 
-    corpus_path = Path(args.corpus)
-    if corpus_path.is_file():
+def main():
+    print("=" * 75)
+    print(" DIRECTIONAL RESIDUALS & FREQUENCY-ANTAGONISTIC ASSOCIATION LOOP")
+    print("=" * 75)
+    print("Type text to analyze. Type 'quit' or 'exit' to terminate.\n")
+
+    current_corpus = BUILTIN_CORPUS
+
+    while True:
         try:
-            corpus_text = corpus_path.read_text(encoding="utf-8-sig")
-        except UnicodeDecodeError as exc:
-            parser.error(f"Could not decode corpus as UTF-8: {exc}")
-    elif args.corpus == parser.get_default("corpus"):
-        print(f"[corpus '{args.corpus}' not found; using the built-in corpus]", file=sys.stderr)
-        corpus_text = BUILTIN_CORPUS
-    else:
-        parser.error(f"Corpus file not found: {corpus_path}")
+            user_input = input("\n[Enter text corpus (or press Enter to use current/default)]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nExiting.")
+            break
 
-    if not tokenize(corpus_text):
-        parser.error("Corpus contains no recognizable tokens.")
+        if user_input.lower() in ("quit", "exit"):
+            print("Goodbye!")
+            break
+        elif user_input:
+            current_corpus = user_input
+            print(f"-> Corpus updated ({len(tokenize(current_corpus))} tokens).")
 
-    fwd = NGramModel(order=args.order, alpha=args.alpha)
-    fwd.train(corpus_text)
-    bwd = ReverseNGramModel(order=args.order, alpha=args.alpha)
-    bwd.train(corpus_text)
+        fwd = NGramModel(order=3, alpha=0.25)
+        fwd.train(current_corpus)
+        bwd = ReverseNGramModel(order=3, alpha=0.25)
+        bwd.train(current_corpus)
 
-    rows = directional_residuals(fwd, bwd, args.level, args.boundaries)
-    if not rows:
-        print("No events to compare.")
-        return
+        rows = compute_directional_residuals(fwd, bwd, level=1, boundaries=False)
+        if not rows:
+            print("No events to compare in this corpus.")
+            continue
 
-    r = np.array([x[4] for x in rows])
-    n = np.array([x[1] for x in rows])
-    print(f"DIRECTIONAL RESIDUALS  level={args.level} ({'bigram' if args.level == 1 else 'trigram'} events)  "
-          f"order={args.order}  alpha={args.alpha}")
-    print("  residual = backward chain log-prob - forward chain log-prob  (0 for raw counts)\n")
-    print(f"  events: {len(rows)}   mean|residual|={np.abs(r).mean():.3f}   max|residual|={np.abs(r).max():.3f}   "
-          f"mean signed={r.mean():+.3f}")
+        r = np.array([x[4] for x in rows])
+        print(f"\n--- DIRECTIONAL RESIDUALS SUMMARY ---")
+        print(f"Events: {len(rows)} | Mean |Residual|: {np.abs(r).mean():.3f} | Max |Residual|: {np.abs(r).max():.3f}")
 
-    print("\n  by observation count (does the residual shrink as evidence grows?):")
-    print("    count   events   mean|residual|")
-    for label, mask in (("1", n == 1), ("2", n == 2), ("3-4", (n >= 3) & (n <= 4)), ("5+", n >= 5)):
-        if mask.any():
-            print(f"    {label:>5} {int(mask.sum()):8d}   {np.abs(r[mask]).mean():.3f}")
+        # Build vocabulary items (take top 8 most frequent words)
+        vocab_items = [token.lower() for token, freq in fwd.vocab.most_common(8) if token not in ("<bos>", "<eos>")]
+        if len(vocab_items) < 2:
+            vocab_items = list(fwd.vocab.keys())[:5]
 
-    ordered = sorted(rows, key=lambda x: x[4])
-    print("\n  negative (forward reading gives the event more mass):")
-    for seq, cnt, f, b, res in ordered[:args.top]:
-        print(f"    {fmt(seq):<40} n={cnt:<3d} residual={res:+.3f}")
-    print("\n  positive (reversed reading gives the event more mass):")
-    for seq, cnt, f, b, res in ordered[::-1][:args.top]:
-        print(f"    {fmt(seq):<40} n={cnt:<3d} residual={res:+.3f}")
+        # Break text into sliding windows / sentences
+        sentences = [tokenize(s) for s in re.split(r'[.!?\n]+', current_corpus) if s.strip()]
+        if len(sentences) < 2:
+            # If text is a single continuous block, chunk it into synthetic windows of 5 words
+            words = tokenize(current_corpus)
+            chunk_size = max(3, len(words) // 4)
+            sentences = [words[i:i + chunk_size] for i in range(0, len(words), chunk_size)]
+
+        X = np.zeros((len(sentences), len(vocab_items)), dtype=np.uint8)
+        token_to_idx = {tok: i for i, tok in enumerate(vocab_items)}
+        for s_idx, sent in enumerate(sentences):
+            sent_set = {t.lower() for t in sent}
+            for tok in sent_set:
+                if tok in token_to_idx:
+                    X[s_idx, token_to_idx[tok]] = 1
+
+        if X.shape[0] >= 2 and X.shape[1] >= 2:
+            matrix_out = build_frequency_antagonistic_matrix(X, feature_names=vocab_items, min_support=1, min_abs_lift_deviation=0.001)
+            print_matrix("Frequency-Antagonistic Association Matrix [-1, +1]", matrix_out["score"], vocab_items)
+            print_matrix("Antagonistic Status Matrix", matrix_out["status"], vocab_items, fmt="{}")
+        else:
+            print("\n[Notice: Insufficient text variability to build association matrix.]")
 
 
 if __name__ == "__main__":
