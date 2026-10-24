@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-Engraving map generator for the 2-LED / 2-detector photonic factoring card.
+QR-style engraving bitmap for the 2-LED / 2-detector photonic factoring card.
 
-Builds the same gate netlist the simulator uses (AND/XOR multiplier + comparator
-for every candidate pair (a, b), priority chain, weighted detector merge) and
-lays it out on a grid of engraving sites.
+Keep next to photonic_engrave.py (reuses its netlist builder).
 
-Outputs (in --out):
-  engrave_map.png          whole card: every gate site, every constant, match tile outlined
-  engrave_tile_detail.png  one tile zoomed, with wires, gate types, constant values
-  engrave_template.csv     gate/constant sites of ONE tile (the stamp), in mm from tile origin
-  engrave_tiles.csv        origin of every tile + which constants are open to LED A / LED B
+Black module = engraved defect, white = left clear. The card is packed as a dense
+square of tiles (one tile per candidate pair a, b), with QR-style corner finders,
+timing lines and an alignment mark so the engraver can register to the pattern.
 
-Site meanings
-  AND site     two masks in series on the TRUE rail, beam merge on the FALSE rail
-  OR site      beam merge on the TRUE rail, two masks in series on the FALSE rail
-  const site   orange = open to LED A (logic 1), blue = open to LED B (logic 0)
-  inverted wire (rail swap) is drawn brown; plain wire grey
-NOT gates are free: they are just a rail swap in the wiring.
+Inside a tile every logic site takes two modules side by side:
+    AND gate            black white
+    OR gate             white black
+    constant = 1        black black   (open to LED A)
+    constant = 0        white white   (open to LED B)
+The first sites of each tile are the 23 constants (a bits, b bits, N bits, zero),
+then the gates in netlist order. Leftover modules are an alternating filler.
 
-This map comes from the logic simulation. It does not validate the physical
-gate implementation, loss or crosstalk of a real engraved card.
+Wiring is NOT drawn here. Gate inputs are listed in qr_template.csv.
+This looks like a QR code but no phone can read it.
+
+Outputs (in --out): engrave_qr.png, engrave_qr_key.png, qr_template.csv, qr_tiles.csv
 
 Usage:
-    python photonic_engrave.py 143
-    python photonic_engrave.py 221 --bits 8 --pitch-um 50 --out card221
+    python photonic_engrave_qr.py 143
+    python photonic_engrave_qr.py 221 --module-px 4 --pitch-um 25 --out card221
 """
 import argparse
 import csv
@@ -33,241 +32,141 @@ import os
 
 from PIL import Image, ImageDraw, ImageFont
 
-C = dict(bg=(14, 16, 20), grid=(30, 34, 42), AND=(79, 209, 197), OR=(214, 96, 196),
-         A=(255, 122, 61), B=(70, 130, 255), wire=(78, 84, 98), winv=(176, 112, 60),
-         text=(232, 228, 220), mute=(140, 144, 154), hit=(255, 255, 255))
+from photonic_engrave import build_tile, const_bit
+
+BORDER, QUIET = 8, 4
 
 
-def font(sz):
-    try:
-        return ImageFont.load_default(size=sz)
-    except TypeError:
-        return ImageFont.load_default()
-
-
-class Node:
-    __slots__ = ("id", "kind", "ins", "level", "name")
-
-
-class Net:
-    def __init__(self):
-        self.nodes, self.consts = [], {}
-
-    def _new(self, kind, ins, name=None):
-        n = Node()
-        n.id, n.kind, n.ins, n.name = len(self.nodes), kind, ins, name
-        n.level = 0 if kind == "C" else 1 + max(x[0].level for x in ins)
-        self.nodes.append(n)
-        return (n, False)
-
-    def const(self, name):
-        if name not in self.consts:
-            self.consts[name] = self._new("C", [], name)
-        return self.consts[name]
-
-    def AND(self, *xs): return self._new("AND", list(xs))
-    def OR(self, *xs): return self._new("OR", list(xs))
-    @staticmethod
-    def NOT(x): return (x[0], not x[1])
-    def XOR(self, x, y): return self.OR(self.AND(x, self.NOT(y)), self.AND(self.NOT(x), y))
-    def XNOR(self, x, y): return self.NOT(self.XOR(x, y))
-
-    def full_add(self, a, b, c):
-        t = self.XOR(a, b)
-        return self.XOR(t, c), self.OR(self.AND(a, b), self.AND(c, t))
-
-
-def build_tile(wa, wb):
-    net, W = Net(), wa + wb
-    a = [net.const(f"a{k}") for k in range(wa)]
-    b = [net.const(f"b{k}") for k in range(wb)]
-    N = [net.const(f"N{k}") for k in range(W)]
-    Z = net.const("zero")
-    acc = [Z] * W
-    for i, ai in enumerate(a):
-        row = [net.AND(ai, bj) for bj in b]
-        c = Z
-        for k in range(i, i + wb + 1):
-            y = row[k - i] if k - i < wb else Z
-            acc[k], c = net.full_add(acc[k], y, c)
-    match = net.AND(*[net.XNOR(acc[k], N[k]) for k in range(W)])
-    return net, match
-
-
-def layout(net):
-    pos, per = {}, {}
-    consts = [n for n in net.nodes if n.kind == "C"]
-    for j, n in enumerate(consts):
-        pos[n.id] = (0, j)
-    for n in net.nodes:
-        if n.kind != "C":
-            per[n.level] = per.get(n.level, 0) + 1
-            pos[n.id] = (n.level, per[n.level] - 1)
-    TW = max(per) + 1
-    TH = max(len(consts), max(per.values()))
-    return pos, TW, TH, consts
-
-
-def const_bit(name, a, b, N):
-    if name == "zero":
-        return 0
-    k = int(name[1:])
-    return ((a if name[0] == "a" else b if name[0] == "b" else N) >> k) & 1
-
-
-def draw_foot(d, x0, y0, wa, wb, amax, bmax, F, width):
-    d.text((x0, y0), "Output merge (what the two photodetectors collect)", fill=C["text"], font=F[1])
-    d.text((x0, y0 + 26), f"Priority chain: {amax - 1} stages, each 1 AND + 1 OR, smallest factor a wins.", fill=C["mute"], font=F[0])
-    for col, (label, w, mx) in enumerate([("Detector 1 (a)", wa, amax), ("Detector 2 (b)", wb, bmax)]):
-        bx = x0 + col * min(560, width // 2)
-        d.text((bx, y0 + 56), f"{label}: bit attenuator transmission = 2^k / {mx}", fill=C["text"], font=F[0])
-        for k in range(w):
-            t = (1 << k) / mx
-            yy = y0 + 80 + k * 18
-            d.text((bx, yy), f"bit {k}", fill=C["mute"], font=F[0])
-            d.rectangle([bx + 50, yy + 2, bx + 50 + max(1, int(300 * t)), yy + 12], fill=C["A"])
-            d.text((bx + 360, yy), f"{t * 100:.3f}%", fill=C["text"], font=F[0])
+def finder(m, x0, y0):
+    for dy in range(7):
+        for dx in range(7):
+            ring = dx in (0, 6) or dy in (0, 6)
+            core = 2 <= dx <= 4 and 2 <= dy <= 4
+            m[y0 + dy][x0 + dx] = 1 if (ring or core) else 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("n", type=int)
     ap.add_argument("--bits", type=int, default=8)
-    ap.add_argument("--pitch-um", type=float, default=50.0, help="site pitch in micrometres")
+    ap.add_argument("--module-px", type=int, default=3)
+    ap.add_argument("--pitch-um", type=float, default=25.0, help="module pitch in micrometres")
     ap.add_argument("--out", default=".")
     x = ap.parse_args()
-    N, nbits = x.n, x.bits
+    N, nbits, P = x.n, x.bits, x.module_px
     wa, wb = (nbits + 1) // 2, nbits - 1
     amax, bmax = (1 << wa) - 1, (1 << wb) - 1
-    na, nb = amax - 1, bmax - 1
     if not 4 <= N < (1 << nbits):
         ap.error(f"N must satisfy 4 <= N < {1 << nbits}")
-    if nb * 4 > 14000:
-        ap.error(f"{nbits} bits means {na:,} x {nb:,} tiles, too many to draw "
-                 f"(a 256-bit card would be ~10^{int(383 * 0.30103)} tiles). Use --bits <= 12.")
+    if nbits > 12:
+        ap.error("use --bits <= 12 (a 256-bit card would be ~10^115 tiles)")
     os.makedirs(x.out, exist_ok=True)
 
-    net, match = build_tile(wa, wb)
-    pos, TW, TH, consts = layout(net)
+    net, _ = build_tile(wa, wb)
+    consts = [n for n in net.nodes if n.kind == "C"]
     gates = [n for n in net.nodes if n.kind != "C"]
-    pitch = x.pitch_um / 1000.0
-    matches = [(a, N // a) for a in range(2, amax + 1) if N % a == 0 and 2 <= N // a <= bmax]
+    sites = consts + gates
+    S = len(sites)
+    T = math.ceil(math.sqrt(2 * S))                       # tile is T x T modules
 
-    # ---- full card -------------------------------------------------------
-    s = max(0, min(3, 14000 // (nb * TW)))
-    detail = s >= 1
-    s = s if detail else max(2, min(8, 14000 // nb))
-    tw, th = (TW * s, TH * s) if detail else (s, s)
-    cw, ch = nb * tw, na * th
-    LM, HEAD, FOOT = 150, 130, 40 + 80 + 18 * wb + 20
-    W = max(cw + LM + 20, 1300)
-    F = (font(14), font(20), font(26))
-    img = Image.new("RGB", (W, HEAD + ch + FOOT), C["bg"])
+    gate_bits = []
+    for n in gates:
+        gate_bits += [1, 0] if n.kind == "AND" else [0, 1]
+
+    def tile_bits(a, b):
+        bits = []
+        for n in consts:
+            v = const_bit(n.name, a, b, N)
+            bits += [v, v]
+        bits += gate_bits
+        bits += [(p + 1) % 2 for p in range(T * T - len(bits))]   # alternating filler
+        return bits
+
+    pairs = [(a, b) for a in range(2, amax + 1) for b in range(2, bmax + 1)]
+    cols = math.ceil(math.sqrt(len(pairs)))
+    rows = math.ceil(len(pairs) / cols)
+    DW, DH = cols * T, rows * T
+    MW, MH = DW + 2 * BORDER, DH + 2 * BORDER
+    m = [[0] * MW for _ in range(MH)]
+    for idx, (a, b) in enumerate(pairs):
+        tr, tc = divmod(idx, cols)
+        bits = tile_bits(a, b)
+        for p, v in enumerate(bits):
+            m[BORDER + tr * T + p // T][BORDER + tc * T + p % T] = v
+    finder(m, 0, 0); finder(m, MW - 7, 0); finder(m, 0, MH - 7)
+    for i in range(8, MW - 8):
+        m[6][i] = 1 if i % 2 == 0 else 0
+    for i in range(8, MH - 8):
+        m[i][6] = 1 if i % 2 == 0 else 0
+    for dy in range(5):                                    # alignment mark, bottom right
+        for dx in range(5):
+            m[MH - 7 + dy][MW - 7 + dx] = 1 if (dx in (0, 4) or dy in (0, 4) or (dx == 2 and dy == 2)) else 0
+
+    # --- verify by reading the bitmap back: which tiles satisfy a*b == N? ---
+    found = []
+    for idx, (a, b) in enumerate(pairs):
+        tr, tc = divmod(idx, cols)
+        def bit(site):
+            p = 2 * site
+            return m[BORDER + tr * T + p // T][BORDER + tc * T + p % T]
+        val = {n.name: bit(i) for i, n in enumerate(consts)}
+        ra = sum(val[f"a{k}"] << k for k in range(wa))
+        rb = sum(val[f"b{k}"] << k for k in range(wb))
+        rn = sum(val[f"N{k}"] << k for k in range(wa + wb))
+        assert (ra, rb, rn) == (a, b, N)
+        if ra * rb == rn:
+            found.append((a, b, tr, tc))
+    truth = [(a, N // a) for a in range(2, amax + 1) if N % a == 0 and 2 <= N // a <= bmax]
+    assert [(a, b) for a, b, _, _ in found] == truth
+
+    # --- render ---
+    W, H = (MW + 2 * QUIET) * P, (MH + 2 * QUIET) * P
+    img = Image.new("1", (W, H), 1)
     d = ImageDraw.Draw(img)
+    for y in range(MH):
+        for xx in range(MW):
+            if m[y][xx]:
+                px, py = (xx + QUIET) * P, (y + QUIET) * P
+                d.rectangle([px, py, px + P - 1, py + P - 1], fill=0)
+    img.save(os.path.join(x.out, "engrave_qr.png"))
 
-    # gate-layer stamp
-    if detail:
-        stamp = Image.new("RGB", (tw, th), C["bg"])
-        sd = ImageDraw.Draw(stamp)
-        g = 1 if s >= 3 else 0
-        for n in gates:
-            px, py = pos[n.id]
-            sd.rectangle([px * s, py * s, px * s + s - 1 - g, py * s + s - 1 - g], fill=C[n.kind])
-    for a in range(2, amax + 1):
-        for b in range(2, bmax + 1):
-            ox, oy = LM + (b - 2) * tw, HEAD + (a - 2) * th
-            if detail:
-                img.paste(stamp, (ox, oy))
-                for j, n in enumerate(consts):
-                    col = C["A"] if const_bit(n.name, a, b, N) else C["B"]
-                    d.rectangle([ox, oy + j * s, ox + s - 1, oy + j * s + s - 1], fill=col)
-                d.rectangle([ox, oy, ox + tw - 1, oy + th - 1], outline=C["grid"])
-            else:
-                d.rectangle([ox, oy, ox + tw - 2, oy + th - 2], fill=C["grid"])
-    for a, b in matches:
-        ox, oy = LM + (b - 2) * tw, HEAD + (a - 2) * th
-        for k in range(3):
-            d.rectangle([ox - k, oy - k, ox + tw + k - 1, oy + th + k - 1], outline=C["hit"])
-    # header
-    d.text((16, 10), f"Photonic factoring card engraving map: N = {N} ({nbits}-bit)", fill=C["text"], font=F[2])
-    d.text((16, 46), f"{na}x{nb} = {na * nb:,} tiles   {len(gates)} gate sites + {len(consts)} constants per tile   "
-           f"total gate sites {na * nb * len(gates):,}   card {cw / tw * TW * pitch:.1f} x {na * TH * pitch:.1f} mm at {x.pitch_um:g} um pitch",
-           fill=C["mute"], font=F[0])
-    lg = [(C["AND"], "AND site"), (C["OR"], "OR site"), (C["A"], "constant open to LED A (1)"), (C["B"], "constant open to LED B (0)")]
-    lx = 16
-    for col, t in lg:
-        d.rectangle([lx, 76, lx + 14, 90], fill=col)
-        d.text((lx + 20, 74), t, fill=C["text"], font=F[0])
-        lx += 40 + 9 * len(t)
-    d.rectangle([lx, 76, lx + 14, 90], outline=C["hit"], width=2)
-    d.text((lx + 20, 74), "tile where a x b = N (light reaches detectors)" if matches else "no match: N is prime, detectors stay dark", fill=C["text"], font=F[0])
-    d.text((16, 100), "Rows: a = 2.." + str(amax) + " (top to bottom)    Columns: b = 2.." + str(bmax) + " (left to right)"
-           + ("" if detail else "    OVERVIEW: tile interior is the same stamp, see engrave_tile_detail.png"), fill=C["mute"], font=F[0])
-    # LEDs
-    for k, (col, t) in enumerate([(C["A"], "LED A"), (C["B"], "LED B")]):
-        cy = HEAD + 40 + k * 70
-        d.ellipse([20, cy, 50, cy + 30], fill=col)
-        d.text((58, cy + 6), t, fill=C["text"], font=F[0])
-        d.line([(50, cy + 15), (LM - 4, cy + 15)], fill=col, width=2)
-    # foot
-    fy = HEAD + ch + 14
-    draw_foot(d, 16, fy, wa, wb, amax, bmax, F, W)
-    for k, t in enumerate(["Detector 1", "Detector 2"]):
-        cx = W - 190 + k * 95
-        d.ellipse([cx, fy + 6, cx + 26, fy + 32], outline=C["text"], width=2)
-        d.text((cx - 6, fy + 38), t, fill=C["text"], font=F[0])
-    img.save(os.path.join(x.out, "engrave_map.png"))
+    key = img.convert("RGB")
+    k = ImageDraw.Draw(key)
+    for a, b, tr, tc in found:
+        x0 = (QUIET + BORDER + tc * T) * P
+        y0 = (QUIET + BORDER + tr * T) * P
+        for o in range(3):
+            k.rectangle([x0 - o, y0 - o, x0 + T * P + o, y0 + T * P + o], outline=(220, 30, 30))
+    try:
+        f = ImageFont.load_default(size=16)
+    except TypeError:
+        f = ImageFont.load_default()
+    band = Image.new("RGB", (W, 54), (255, 255, 255))
+    ImageDraw.Draw(band).text((10, 6), f"N={N} ({nbits}-bit)  red box = tile where a x b = N: " +
+                              (", ".join(f"{a}x{b}" for a, b, *_ in found) or "none (prime)"), fill=(0, 0, 0), font=f)
+    ImageDraw.Draw(band).text((10, 28), "black = engrave, white = leave clear. Corner squares + timing + small mark = registration.", fill=(80, 80, 80), font=f)
+    out = Image.new("RGB", (W, H + 54), (255, 255, 255))
+    out.paste(key, (0, 0)); out.paste(band, (0, H))
+    out.save(os.path.join(x.out, "engrave_qr_key.png"))
 
-    # ---- tile detail -----------------------------------------------------
-    S, M = 16, 100
-    ta, tb = matches[0] if matches else (2, 2)
-    dw, dh = M + TW * S + 20, 60 + TH * S + 20
-    im2 = Image.new("RGB", (dw, dh), C["bg"])
-    e = ImageDraw.Draw(im2)
-    ctr = lambda i: (M + pos[i][0] * S + S // 2, 60 + pos[i][1] * S + S // 2)
-    for n in gates:
-        for src, inv in n.ins:
-            e.line([ctr(src.id), ctr(n.id)], fill=C["winv"] if inv else C["wire"], width=1)
-    for j, n in enumerate(consts):
-        bit = const_bit(n.name, ta, tb, N)
-        px, py = pos[n.id]
-        e.rectangle([M + px * S + 2, 60 + py * S + 2, M + px * S + S - 3, 60 + py * S + S - 3], fill=C["A"] if bit else C["B"])
-        e.text((6, 60 + py * S + 1), f"{n.name}={bit}", fill=C["mute"], font=F[0])
-    for n in gates:
-        px, py = pos[n.id]
-        e.rounded_rectangle([M + px * S + 2, 60 + py * S + 2, M + px * S + S - 3, 60 + py * S + S - 3], radius=3, fill=C[n.kind])
-        e.text((M + px * S + 4, 60 + py * S + 1), n.kind[0], fill=C["bg"], font=F[0])
-    mx_, my_ = pos[match[0].id]
-    e.rectangle([M + mx_ * S, 60 + my_ * S, M + mx_ * S + S - 1, 60 + my_ * S + S - 1], outline=C["hit"], width=2)
-    e.text((6, 8), f"Tile detail: a = {ta}, b = {tb}" + ("  (match tile)" if matches else "  (N prime: no match tile, shown for a=b=2)"), fill=C["text"], font=F[1])
-    e.text((6, 34), "Left column: constants.  Right edge: white box = match output.  Brown wires swap rails (NOT).", fill=C["mute"], font=F[0])
-    im2.save(os.path.join(x.out, "engrave_tile_detail.png"))
+    pitch = x.pitch_um / 1000.0
+    with open(os.path.join(x.out, "qr_template.csv"), "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["site", "node_id", "kind", "name", "module_row", "module_col_pair", "inputs(node_id:rail_swap)"])
+        for i, n in enumerate(sites):
+            p = 2 * i
+            w.writerow([i, n.id, "CONST" if n.kind == "C" else n.kind, n.name or "", p // T, p % T,
+                        " ".join(f"{s.id}:{int(v)}" for s, v in n.ins)])
+    with open(os.path.join(x.out, "qr_tiles.csv"), "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["a", "b", "tile_row", "tile_col", "origin_x_mm", "origin_y_mm", "is_match"])
+        for idx, (a, b) in enumerate(pairs):
+            tr, tc = divmod(idx, cols)
+            w.writerow([a, b, tr, tc, round((BORDER + tc * T) * pitch, 4), round((BORDER + tr * T) * pitch, 4), int(a * b == N)])
 
-    # ---- CSVs ------------------------------------------------------------
-    with open(os.path.join(x.out, "engrave_template.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["id", "kind", "name", "site_x", "site_y", "x_mm", "y_mm", "inputs(id:inv)"])
-        for n in net.nodes:
-            px, py = pos[n.id]
-            w.writerow([n.id, n.kind if n.kind != "C" else "CONST", n.name or "", px, py,
-                        round(px * pitch, 4), round(py * pitch, 4),
-                        " ".join(f"{s.id}:{int(i)}" for s, i in n.ins)])
-    with open(os.path.join(x.out, "engrave_tiles.csv"), "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["a", "b", "origin_x_mm", "origin_y_mm", "open_to_LED_A", "open_to_LED_B", "is_match"])
-        for a in range(2, amax + 1):
-            for b in range(2, bmax + 1):
-                ones = [n.name for n in consts if const_bit(n.name, a, b, N)]
-                zeros = [n.name for n in consts if not const_bit(n.name, a, b, N)]
-                w.writerow([a, b, round((b - 2) * TW * pitch, 4), round((a - 2) * TH * pitch, 4),
-                            " ".join(ones), " ".join(zeros), int(a * b == N)])
-
-    print(f"N={N}  {nbits}-bit  tiles {na}x{nb}={na * nb:,}  per tile: {len(gates)} gates + {len(consts)} constants "
-          f"(stamp {TW}x{TH} sites)")
-    print(f"Card size ~{nb * TW * pitch:.1f} x {na * TH * pitch:.1f} mm at {x.pitch_um:g} um pitch; "
-          f"full gate-level map: {detail}")
-    print("Match tiles (a, b):", matches or "none (prime)")
-    print("Wrote engrave_map.png, engrave_tile_detail.png, engrave_template.csv, engrave_tiles.csv in", os.path.abspath(x.out))
+    print(f"N={N} {nbits}-bit: {len(pairs):,} tiles in {cols}x{rows}, tile {T}x{T} modules ({len(gates)} gates + {len(consts)} constants)")
+    print(f"Bitmap {MW}x{MH} modules; card {MW * pitch:.1f} x {MH * pitch:.1f} mm at {x.pitch_um:g} um/module")
+    print("Read-back check passed. Match tiles:", [(a, b) for a, b, *_ in found] or "none (prime)")
 
 
 if __name__ == "__main__":
