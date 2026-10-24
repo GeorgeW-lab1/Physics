@@ -1,353 +1,301 @@
 #!/usr/bin/env python3
-"""Eight reusable passive optical-adder cells, camera readout, electronic feedback.
+"""Variable-cell IR arithmetic bench and 20 x 20 mm printable mask.
+Install: python -m pip install pillow
 Run: python reusable_ir_bench.py
-Standard library only (Tkinter required).
-
-Not an all-optical factorer: CPU schedules trial divisors and repeated additions.
-Each addition uses measured camera intensities for sum and carry. No modulo or
-integer multiplication is used to decide a candidate match. Camera electronics
-threshold measured levels. Input modulation and carry feedback are electronic.
-Two LEDs illuminate three signal apertures (A: a,b; B: carry) and references.
-Independently addressable shutters/SLM regions are REQUIRED to set the inputs.
-A fixed printed mask and two unmodulated LEDs alone cannot supply those inputs.
-
-The camera model is a calibrated integrating ROI per cell: incoherent light
-from equal-power apertures is summed within that ROI. A physical build needs
-collection optics/defocus or pixel summation, flat-field calibration, IR-sensitive
-camera, modulation hardware, and repeatable exposure. No diffraction model.
+Cells can be changed in the GUI (1..64); DEFAULT_CELLS sets the startup value.
+This is a hybrid intensity/feedback model, not an all-optical factorer.
+Programmable shutters, LED routing and camera calibration are required physically.
+Mask aperture diameter shrinks automatically if needed; geometry is unvalidated.
 """
 import math
 import random
+import csv
 import tkinter as tk
 from tkinter import ttk, messagebox
 from collections import deque
 from pathlib import Path
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
-CELLS = 8
-
-DPI=2540  # Exactly 100 pixels/mm: 2000 pixels = 20 mm.
+DEFAULT_CELLS=8
+MAX_CELLS=64
+DPI=2540
 SIZE_MM=20
 PX_PER_MM=100
-DIAMETER_MM=0.7
+DIAMETER_MM=.7
+
+def grid_shape(cells):
+    cols=min(cells,math.ceil(math.sqrt(2*cells)))
+    return cols,math.ceil(cells/cols)
 
 def mm(v):
     return round(v*PX_PER_MM)
 
-def make_mask():
-    image=Image.new('1',(2000,2000),0)
+def make_mask(cells=DEFAULT_CELLS):
+    if not 1 <= cells <= MAX_CELLS:
+        raise ValueError(f'Cells must be 1..{MAX_CELLS}.')
+    cols,rows=grid_shape(cells)
+    pitchx,pitchy=16/cols,16/rows
+    diameter=min(DIAMETER_MM,pitchx/4.5,pitchy/4)
+    dx,dy=pitchx*.25,pitchy*.16
+    image=Image.new('1',(mm(SIZE_MM),mm(SIZE_MM)),0)
     draw=ImageDraw.Draw(image)
     layout=[]
-    radius=mm(DIAMETER_MM)/2
-    for i in range(8):
-        cx=3.25+(i%4)*4.5
-        cy=6+(i//4)*8
-        for label,dx,dy in [('a',-1, -.7),('b',0,-.7),('carry',1,-.7),
-                            ('ref_A',-.5,.7),('ref_B',.5,.7)]:
-            x,y=mm(cx+dx),mm(cy+dy)
-            draw.ellipse((x-radius,y-radius,x+radius,y+radius),fill=1)
-            layout.append((i+1,label,cx+dx,cy+dy))
-    for xx,yy in [(1.2,1.2),(18.8,1.2),(1.2,18.8),(18.8,18.8)]:
-        x,y=mm(xx),mm(yy)
-        draw.line((x-mm(.4),y,x+mm(.4),y),fill=1,width=mm(.08))
-        draw.line((x,y-mm(.4),x,y+mm(.4)),fill=1,width=mm(.08))
-    draw.rectangle((mm(2),mm(.9),mm(2.25),mm(1.15)),fill=1)
-    return image,layout
+    r=mm(diameter)/2
+    for i in range(cells):
+        cx,cy=2+(i%cols+.5)*pitchx,2+(i//cols+.5)*pitchy
+        for label,ox,oy in [('a',-dx,-dy),('b',0,-dy),('carry',dx,-dy),
+                             ('ref_A',-dx/2,dy),('ref_B',dx/2,dy)]:
+            x,y=mm(cx+ox),mm(cy+oy)
+            draw.ellipse((x-r,y-r,x+r,y+r),fill=1)
+            layout.append((i+1,label,cx+ox,cy+oy,diameter))
+    for x,y in [(1,1),(19,1),(1,19),(19,19)]:
+        x,y=mm(x),mm(y)
+        draw.line((x-mm(.3),y,x+mm(.3),y),fill=1,width=mm(.06))
+        draw.line((x,y-mm(.3),x,y+mm(.3)),fill=1,width=mm(.06))
+    draw.rectangle((mm(1.6),mm(.9),mm(1.8),mm(1.1)),fill=1)
+    meta=dict(cells=cells,cols=cols,rows=rows,diameter=diameter,pitchx=pitchx,pitchy=pitchy)
+    return image,layout,meta
 
-def export_mask(folder):
+def export_mask(folder,cells=DEFAULT_CELLS):
     folder=Path(folder)
     folder.mkdir(parents=True,exist_ok=True)
-    image,layout=make_mask()
-    path=folder/'physical_adder_mask_2x4_600dpi.png'
+    image,layout,meta=make_mask(cells)
+    stem=f'physical_adder_mask_20mm_{cells}cells'
+    path=folder/(stem+'.png')
     image.save(path,dpi=(DPI,DPI))
-    import csv
-    with (folder/'physical_adder_mask_coordinates_mm.csv').open('w',newline='') as f:
-        writer=csv.writer(f)
-        writer.writerow(['cell','aperture','x_mm_from_left','y_mm_from_top'])
-        writer.writerows(layout)
-    (folder/'physical_adder_mask_README.txt').write_text(
-        'FIXED PHYSICAL ADDER MASK\n'
-        '2 rows x 4 identical cells. White=open; black=opaque.\n'
-        'Nominal print size: 20 x 20 mm at 2540 DPI. Print at 100%, never fit-to-page.\n'
-        'Raster dimensions are rounded to whole pixels; verify scale with a ruler.\n'
-        'Five 1.5 mm nominal holes per cell: a,b,carry above; reference A,B below.\n'
-        '25 mm horizontal/vertical cell pitch. Four alignment crosses outside array.\n'
-        'Corner square identifies orientation. Coordinates measured from upper-left.\n'
-        'No factor/product table; no N-dependent geometry; all cells identical.\n'
-        'This is a proposed aperture layout, not an optical prescription or verified device.\n'
-        'Requires programmable shutters/SLM for a,b,carry, separate LED routing, and camera optics.\n'
-        'The camera sums the three signal aperture regions but measures references separately.\n'
-        'For transparent film: black must block the operating IR wavelength; verify experimentally.\n'
-        'The image is not an ordinary paper stencil: opaque paper would also block white regions.\n')
-    if not path.exists() or not path.stat().st_size:
-        raise OSError('Mask PNG export failed.')
-    return path,image
+    with (folder/(stem+'.csv')).open('w',newline='') as f:
+        w=csv.writer(f)
+        w.writerow(['cell','aperture','x_mm','y_mm','diameter_mm'])
+        w.writerows(layout)
+    (folder/(stem+'_notes.txt')).write_text(
+        f'20 x 20 mm at {DPI} DPI; 2000 x 2000 pixels.\n'
+        f'{cells} cells in {meta["cols"]} columns x {meta["rows"]} rows; last row may be partial.\n'
+        f'Aperture diameter: {meta["diameter"]:.6f} mm nominal.\n'
+        f'Cell pitch: {meta["pitchx"]:.6f} x {meta["pitchy"]:.6f} mm.\n'
+        'White=open; black=opaque. Print actual size, no fit-to-page. Verify scale.\n'
+        'Upper holes a,b,carry; lower holes reference A,B.\n'
+        'All occupied cells identical; no factors/products encoded.\n'
+        'Proposed geometry only. Smaller holes require appropriate fabrication and imaging.\n'
+        'Requires programmable shutters/SLM, separate LED routing and calibrated camera.\n'
+        'Verify mask opacity at operating IR wavelength.\n')
+    return path,image,meta
 
 class CameraBench:
-    def __init__(self, exposure=.22, leak=.001, noise=.002, seed=1, led_a=True, led_b=True):
-        self.exposure,self.leak,self.noise = exposure,leak,noise
-        self.rng = random.Random(seed)
-        self.led_a,self.led_b = led_a,led_b
-        self.exposures = 0
-        self.last = None
-    def capture(self, inputs):
-        if len(inputs) != CELLS:
-            raise ValueError('Exactly eight input cells required.')
+    def __init__(self,cells=DEFAULT_CELLS,exposure=.22,leak=.001,noise=.002,seed=1,led_a=True,led_b=True):
+        self.cells=cells
+        self.exposure,self.leak,self.noise=exposure,leak,noise
+        self.rng=random.Random(seed)
+        self.led_a,self.led_b=led_a,led_b
+        self.exposures=0
+        self.last=None
+    def capture(self,inputs):
+        if len(inputs)!=self.cells:
+            raise ValueError(f'Exactly {self.cells} input cells required.')
         def pixel(v):
-            return max(0.0,min(1.0,v+self.rng.gauss(0,self.noise)))
-        rows = []
+            return max(0.,min(1.,v+self.rng.gauss(0,self.noise)))
+        rows=[]
         for a,b,c in inputs:
             if any(x not in (0,1) for x in (a,b,c)):
-                raise ValueError('Inputs must be binary.')
-            # All numbers below are light intensities, not Boolean gate outputs.
-            dark = .01
-            power = self.exposure
-            A,B = float(self.led_a),float(self.led_b)
-            t = lambda x:self.leak+(1-self.leak)*x
-            signal = pixel(dark+power*(A*(t(a)+t(b))+B*t(c)))
-            black = pixel(dark)
-            refa = pixel(dark+power*A)
-            refb = pixel(dark+power*B)
-            baseline = pixel(dark+power*self.leak*(2*A+B))
-            rows.append(dict(signal=signal,black=black,refa=refa,refb=refb,baseline=baseline))
-        self.exposures += 1
-        # Decoder receives only measured ROIs, not input bits.
-        decoded = []
+                raise ValueError('Binary inputs required.')
+            dark,p,A,B=.01,self.exposure,float(self.led_a),float(self.led_b)
+            t=lambda x:self.leak+(1-self.leak)*x
+            rows.append(dict(signal=pixel(dark+p*(A*(t(a)+t(b))+B*t(c))),
+                black=pixel(dark),refa=pixel(dark+p*A),refb=pixel(dark+p*B),
+                baseline=pixel(dark+p*self.leak*(2*A+B))))
+        self.exposures+=1
+        decoded=[]
         for row in rows:
-            A = row['refa']-row['black']
-            B = row['refb']-row['black']
-            if min(A,B) < .04 or abs(A-B) > .25*max(A,B):
-                raise RuntimeError('Insufficient / unequal LED reference signal. Check both LEDs and exposure.')
-            step = (A+B)/2*(1-self.leak)
-            level = (row['signal']-row['baseline'])/step
-            k = round(level)
-            if row['signal'] > .98 or not 0 <= k <= 3 or abs(level-k) > .35:
-                raise RuntimeError('Ambiguous or saturated camera level; reduce noise/leak or adjust exposure.')
+            A,B=row['refa']-row['black'],row['refb']-row['black']
+            if min(A,B)<.04 or abs(A-B)>.25*max(A,B):
+                raise RuntimeError('Insufficient/unequal LED references.')
+            level=(row['signal']-row['baseline'])/((A+B)/2*(1-self.leak))
+            k=round(level)
+            if row['signal']>.98 or not 0<=k<=3 or abs(level-k)>.35:
+                raise RuntimeError('Ambiguous/saturated camera level. Adjust exposure/noise.')
             decoded.append(dict(level=level,k=k,sum=k%2,carry=int(k>=2)))
-        self.last = dict(inputs=list(inputs),rows=rows,decoded=decoded)
+        self.last=dict(inputs=list(inputs),rows=rows,decoded=decoded)
         return decoded
 
-
 def optical_add(bench,x,y,width):
-    """Generator: eight independent bit lanes per exposure; carry dependencies
-    are scheduled in later exposures, never resolved by a hidden software adder.
-    Lanes are reused for positions k, k+8, ... across eight parallel additions.
-    """
-    if len(x) != CELLS or len(y) != CELLS:
-        raise ValueError('Eight lanes required.')
-    carry = [0]*CELLS
-    result = [0]*CELLS
+    n=bench.cells
+    if len(x)!=n or len(y)!=n:
+        raise ValueError(f'{n} lanes required.')
+    carry,result=[0]*n,[0]*n
     for k in range(width):
-        inputs = [((x[i]>>k)&1,(y[i]>>k)&1,carry[i]) for i in range(CELLS)]
-        decoded = bench.capture(inputs)
-        for i,d in enumerate(decoded):
-            result[i] |= d['sum'] << k
-            carry[i] = d['carry']
-        yield dict(type='frame',bit=k,width=width)
+        inputs=[((x[i]>>k)&1,(y[i]>>k)&1,carry[i]) for i in range(n)]
+        ds=bench.capture(inputs)
+        for i,d in enumerate(ds):
+            result[i]|=d['sum']<<k
+            carry[i]=d['carry']
+        yield dict(bit=k,width=width)
     if any(carry):
-        raise RuntimeError('Arithmetic overflow: increase accumulator width.')
+        raise RuntimeError('Arithmetic overflow.')
     return result
 
-
 def factor_job(bench,N,report):
-    """CPU trial-division schedule; optical repeated-addition arithmetic.
-    Uses no stored product table. Only one factor pair is returned.
-    Search cost is intentionally visible, not presented as an optical speedup.
-    """
-    width = N.bit_length()+1
-    candidates = list(range(2,math.isqrt(N)+1))
-    if not candidates:
-        return None
-    for start in range(0,len(candidates),CELLS):
-        batch = candidates[start:start+CELLS]
-        active = [i < len(batch) for i in range(CELLS)]
-        divisors = batch+[0]*(CELLS-len(batch))
-        sums,counts = [0]*CELLS,[0]*CELLS
-        report(f'Electronic scheduler: candidate divisors {batch}; repeated optical additions')
+    n=bench.cells
+    width=N.bit_length()+1
+    candidates=list(range(2,math.isqrt(N)+1))
+    for start in range(0,len(candidates),n):
+        batch=candidates[start:start+n]
+        active=[i<len(batch) for i in range(n)]
+        divisors=batch+[0]*(n-len(batch))
+        sums,counts=[0]*n,[0]*n
+        report(f'Electronic scheduler: trial divisors {batch}')
         while any(active):
-            increments = [divisors[i] if active[i] else 0 for i in range(CELLS)]
-            sums = yield from optical_add(bench,sums,increments,width)
-            hits = []
-            for i in range(CELLS):
-                if not active[i]:
-                    continue
-                counts[i] += 1
-                # Electronic comparison of camera-derived accumulated integers.
-                if sums[i] == N:
-                    hits.append((divisors[i],counts[i]))
-                    active[i] = False
-                elif sums[i] > N:
-                    active[i] = False
-            if hits:
-                return min(hits)
+            increments=[divisors[i] if active[i] else 0 for i in range(n)]
+            sums=yield from optical_add(bench,sums,increments,width)
+            hits=[]
+            for i in range(n):
+                if not active[i]: continue
+                counts[i]+=1
+                if sums[i]==N:
+                    hits.append((divisors[i],counts[i]));active[i]=False
+                elif sums[i]>N:
+                    active[i]=False
+            if hits: return min(hits)
     return None
 
+def truth_job(bench,report):
+    n=bench.cells
+    tested=0
+    for start in range(0,8,n):
+        ids=list(range(start,min(8,start+n)))
+        inputs=[((i>>2)&1,(i>>1)&1,i&1) for i in ids]
+        inputs += [(0,0,0)]*(n-len(inputs))
+        decoded=bench.capture(inputs)
+        yield dict(bit=0,width=1)
+        for j,i in enumerate(ids):
+            if decoded[j]['k']!=sum(inputs[j]):
+                raise RuntimeError(f'Truth table failure for {inputs[j]}')
+            tested+=1
+    return f'All {tested} full-adder combinations passed in {bench.exposures} exposure(s).'
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('8 reusable IR arithmetic cells — camera + electronic feedback')
-        self.geometry('1190x850')
-        self.minsize(1000,720)
-        self.vars = {k:tk.StringVar(value=str(v)) for k,v in
-            dict(N=143,x=11,y=13,exposure=.22,leak=.001,noise=.002,seed=1,delay=5).items()}
-        self.A,self.B = tk.BooleanVar(value=True),tk.BooleanVar(value=True)
-        self.status = tk.StringVar(value='Ready. Start with the full-adder truth-table test.')
-        self.job = None
-        self.frames = 0
-        self.last_inputs = [(0,0,0)]*CELLS
-        self.last_camera = None
-        self.photo = None
-        self.log_lines = deque(maxlen=300)
-        top = ttk.Frame(self,padding=8)
-        top.pack(fill='x')
-        labels = [('N','Factor N (4–255)'),('x','Adder X (0–255)'),('y','Adder Y (0–255)'),
-                  ('exposure','Exposure'),('leak','Closed transmission'),('noise','Camera noise σ'),
-                  ('seed','Seed'),('delay','Frame delay ms')]
+        self.title('Variable-cell IR bench + 20 mm mask PNG')
+        self.geometry('1240x880')
+        self.vars={k:tk.StringVar(value=str(v)) for k,v in dict(cells=DEFAULT_CELLS,N=143,x=11,y=13,exposure=.22,leak=.001,noise=.002,seed=1,delay=5).items()}
+        self.A,self.B=tk.BooleanVar(value=True),tk.BooleanVar(value=True)
+        self.status=tk.StringVar(value='Set Cells, then run. Mask and arithmetic use the same count.')
+        self.job=None
+        self.last_camera=None
+        self.display_cells=DEFAULT_CELLS
+        self.mask_window=None
+        self.log_lines=deque(maxlen=250)
+        top=ttk.Frame(self,padding=8);top.pack(fill='x')
+        self.entries=[]
+        labels=[('cells','Cells (1–64)'),('N','Factor N'),('x','Adder X'),('y','Adder Y'),('exposure','Exposure'),('leak','Leak'),('noise','Noise σ'),('seed','Seed'),('delay','Delay ms')]
         for j,(key,label) in enumerate(labels):
-            ttk.Label(top,text=label).grid(row=0,column=j,padx=3,sticky='w')
-            ttk.Entry(top,textvariable=self.vars[key],width=12).grid(row=1,column=j,padx=3)
-        bar = ttk.Frame(self,padding=8)
-        bar.pack(fill='x')
-        self.buttons = []
-        for text,command in [('Full-adder test',lambda:self.start('truth')),('Optical X + Y',lambda:self.start('add')),
-                             ('Factor N (hybrid)',lambda:self.start('factor'))]:
-            b = ttk.Button(bar,text=text,command=command)
-            b.pack(side='left',padx=4)
-            self.buttons.append(b)
+            ttk.Label(top,text=label).grid(row=0,column=j,padx=3)
+            if key=='cells':
+                entry=ttk.Spinbox(top,from_=1,to=MAX_CELLS,textvariable=self.vars[key],width=10)
+            else:
+                entry=ttk.Entry(top,textvariable=self.vars[key],width=10)
+            entry.grid(row=1,column=j,padx=3)
+            self.entries.append(entry)
+        bar=ttk.Frame(self,padding=8);bar.pack(fill='x')
+        self.buttons=[]
+        for label,command in [('Full-adder test',lambda:self.start('truth')),('Optical X + Y',lambda:self.start('add')),('Factor N (hybrid)',lambda:self.start('factor')),('Export/show mask PNG',self.show_mask)]:
+            b=ttk.Button(bar,text=label,command=command);b.pack(side='left',padx=4);self.buttons.append(b)
         ttk.Button(bar,text='Stop',command=self.stop).pack(side='left',padx=4)
-        ttk.Checkbutton(bar,text='LED A',variable=self.A).pack(side='left',padx=8)
-        ttk.Checkbutton(bar,text='LED B',variable=self.B).pack(side='left')
-        ttk.Label(self,textvariable=self.status,padding=8,wraplength=1150).pack(fill='x')
-        self.canvas = tk.Canvas(self,bg='#101827',height=430,highlightthickness=0)
-        self.canvas.pack(fill='both',expand=True,padx=8)
+        ttk.Checkbutton(bar,text='LED A (next run)',variable=self.A).pack(side='left',padx=5)
+        ttk.Checkbutton(bar,text='LED B (next run)',variable=self.B).pack(side='left')
+        ttk.Label(self,textvariable=self.status,padding=8,wraplength=1200).pack(fill='x')
+        frame=ttk.Frame(self);frame.pack(fill='both',expand=True,padx=8)
+        self.canvas=tk.Canvas(frame,bg='#101827',highlightthickness=0)
+        scroll=ttk.Scrollbar(frame,orient='vertical',command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side='right',fill='y');self.canvas.pack(side='left',fill='both',expand=True)
         self.canvas.bind('<Configure>',lambda e:self.draw())
-        self.log = tk.Text(self,height=9,wrap='word',font=('TkFixedFont',10))
-        self.log.pack(fill='x',padx=8,pady=8)
-        self.log.configure(state='disabled')
-        ttk.Label(self,text='PHYSICAL BOUNDARY: mask = fixed equal apertures; shutters/SLM = programmable inputs; camera = light sums.\n'
-            'CPU = thresholding, carry feedback, comparison and candidate search. Multiple exposures, no product lookup, no all-optical factoring claim.',padding=8).pack(fill='x')
-        self.say('Eight identical cells. Each has three signal apertures (a,b,c), two reference ROIs and a black/baseline calibration ROI.')
+        self.log=tk.Text(self,height=8,wrap='word',font=('TkFixedFont',10));self.log.pack(fill='x',padx=8,pady=8)
+        ttk.Label(self,text='Fixed mask + programmable shutters + camera intensity readout. CPU supplies decoding, carry feedback and trial search.\n20 × 20 mm mask is invariant across input numbers; aperture size adapts to cell count. No all-optical factoring claim.',padding=8).pack(fill='x')
+        self.say('Fewer than 8 cells: truth test uses multiple exposures. More than 8: unused test lanes receive zero inputs.')
         self.draw()
     def say(self,s):
-        self.log_lines.append(s)
-        self.log.configure(state='normal')
-        self.log.delete('1.0','end')
-        self.log.insert('end','\n'.join(self.log_lines))
-        self.log.see('end')
-        self.log.configure(state='disabled')
+        self.log_lines.append(s);self.log.configure(state='normal');self.log.delete('1.0','end')
+        self.log.insert('end','\n'.join(self.log_lines));self.log.see('end');self.log.configure(state='disabled')
+    def cell_count(self):
+        n=int(self.vars['cells'].get())
+        if not 1<=n<=MAX_CELLS: raise ValueError(f'Cells must be 1..{MAX_CELLS}.')
+        return n
     def params(self):
-        n,x,y = [int(self.vars[k].get()) for k in ('N','x','y')]
-        if not 4 <= n <= 255 or not 0 <= x <= 255 or not 0 <= y <= 255:
-            raise ValueError('N must be 4–255; X and Y must be 0–255.')
-        power,leak,noise = [float(self.vars[k].get()) for k in ('exposure','leak','noise')]
-        if not all(math.isfinite(z) for z in (power,leak,noise)):
-            raise ValueError('Parameters must be finite.')
-        if not (0 <= power <= 1 and 0 <= leak < .5 and 0 <= noise <= 1):
-            raise ValueError('Exposure 0–1, leak 0–<0.5, noise 0–1.')
-        delay = int(self.vars['delay'].get())
-        if not 0 <= delay <= 1000:
-            raise ValueError('Delay must be 0–1000 ms.')
-        bench = CameraBench(power,leak,noise,int(self.vars['seed'].get()),self.A.get(),self.B.get())
-        return n,x,y,delay,bench
+        n=self.cell_count()
+        N,x,y=[int(self.vars[k].get()) for k in ('N','x','y')]
+        if not 4<=N<=255 or not 0<=x<=255 or not 0<=y<=255: raise ValueError('N: 4–255; X/Y: 0–255.')
+        p,l,z=[float(self.vars[k].get()) for k in ('exposure','leak','noise')]
+        if not all(math.isfinite(v) for v in (p,l,z)) or not (0<=p<=1 and 0<=l<.5 and 0<=z<=1): raise ValueError('Exposure 0–1, leak 0–<0.5, noise 0–1.')
+        delay=int(self.vars['delay'].get())
+        if not 0<=delay<=1000: raise ValueError('Delay: 0–1000 ms.')
+        return N,x,y,delay,CameraBench(n,p,l,z,int(self.vars['seed'].get()),self.A.get(),self.B.get())
     def start(self,mode):
-        if self.job is not None:
-            return
-        try:
-            self.N,self.x,self.y,self.delay,self.bench = self.params()
-        except ValueError as e:
-            messagebox.showerror('Input',str(e)); return
-        self.mode = mode
-        self.frames = 0
-        self.last_camera = None
-        for b in self.buttons:
-            b.configure(state='disabled')
-        if mode == 'factor':
-            self.say(f'Factoring {self.N}: electronic trial-divisor search; camera-derived repeated sums.')
-            self.job = factor_job(self.bench,self.N,self.say)
-        elif mode == 'add':
-            self.say(f'Adding {self.x} and {self.y} in all eight lanes; 9 camera exposures.')
-            self.job = optical_add(self.bench,[self.x]*CELLS,[self.y]*CELLS,9)
-        else:
-            self.job = self.truth_job()
+        if self.job is not None:return
+        try:self.N,self.x,self.y,self.delay,self.bench=self.params()
+        except ValueError as e:messagebox.showerror('Input',str(e));return
+        self.mode=mode;self.display_cells=self.bench.cells;self.last_camera=None
+        for e in self.entries+self.buttons:e.configure(state='disabled')
+        if mode=='factor':self.job=factor_job(self.bench,self.N,self.say)
+        elif mode=='add':self.job=optical_add(self.bench,[self.x]*self.bench.cells,[self.y]*self.bench.cells,9)
+        else:self.job=truth_job(self.bench,self.say)
         self.after(1,self.tick)
-    def truth_job(self):
-        inputs = [((i>>2)&1,(i>>1)&1,i&1) for i in range(CELLS)]
-        ds = self.bench.capture(inputs)
-        yield dict(type='frame',bit=0,width=1)
-        failures = []
-        for inp,d in zip(inputs,ds):
-            expected = sum(inp)
-            if d['k'] != expected:
-                failures.append((inp,d['k']))
-        if failures:
-            raise RuntimeError(f'Incorrect truth-table camera decoding: {failures}')
-        return 'All 8 full-adder input combinations passed in one exposure.'
     def tick(self):
-        if self.job is None:
-            return
+        if self.job is None:return
         try:
-            event = next(self.job)
-            self.last_camera = self.bench.last
-            self.frames = self.bench.exposures
-            self.status.set(f'{self.mode}: exposure {self.frames}; bit {event["bit"]+1}/{event["width"]}; fixed hardware: 8 arithmetic cells')
-            self.draw()
-            self.after(self.delay,self.tick)
-        except StopIteration as stop:
-            result = stop.value
-            if self.mode == 'factor':
-                msg = f'Camera-derived candidate factor pair: {self.N} = {result[0]} × {result[1]}' if result else 'No divisor detected by the hybrid search; a noisy run is not a primality certificate.'
-            elif self.mode == 'add':
-                msg = f'Camera-derived addition result: {self.x} + {self.y} → {result[0]} (eight lanes: {result})'
-            else:
-                msg = result
-            self.status.set(msg+f' | {self.bench.exposures} exposures')
-            self.say(self.status.get())
-            self.finish()
+            e=next(self.job);self.last_camera=self.bench.last
+            self.status.set(f'{self.mode}: {self.bench.cells} cells | exposure {self.bench.exposures} | bit {e["bit"]+1}/{e["width"]}')
+            self.draw();self.after(self.delay,self.tick)
+        except StopIteration as e:
+            r=e.value
+            if self.mode=='factor':msg=f'Camera-derived candidate: {self.N} = {r[0]} × {r[1]}' if r else 'No divisor detected; a noisy search is not a primality certificate.'
+            elif self.mode=='add':msg=f'Camera-derived sum: {self.x} + {self.y} → {r[0]}; {len(r)} lanes'
+            else:msg=r
+            self.status.set(msg+f' | {self.bench.exposures} exposures');self.say(self.status.get())
+            self.finish();self.show_mask(self.bench.cells)
         except Exception as e:
-            self.status.set('Stopped: '+str(e))
-            self.say(self.status.get())
-            self.finish()
+            self.status.set('Stopped: '+str(e));self.say(self.status.get());self.finish()
     def finish(self):
-        self.job = None
-        for b in self.buttons:
-            b.configure(state='normal')
+        self.job=None
+        for e in self.entries+self.buttons:e.configure(state='normal')
     def stop(self):
-        if self.job is not None:
-            self.job.close()
-            self.finish()
-            self.status.set('Stopped. No further exposures scheduled.')
+        if self.job is not None:self.job.close();self.finish();self.status.set('Stopped. No completed-run export.')
+    def show_mask(self,cells=None):
+        try:
+            n=self.cell_count() if cells is None else cells
+            path,image,meta=export_mask(Path(__file__).resolve().parent/'mask',n)
+            self.say(f'Mask: {n} cells, diameter {meta["diameter"]:.3f} mm | {path}')
+            if self.mask_window is not None and self.mask_window.winfo_exists():self.mask_window.destroy()
+            win=tk.Toplevel(self);self.mask_window=win;win.title('20 × 20 mm physical mask PNG')
+            preview=image.convert('RGB').resize((600,600),Image.Resampling.NEAREST)
+            photo=ImageTk.PhotoImage(preview);label=ttk.Label(win,image=photo);label.image=photo;label.pack(padx=8,pady=8)
+            ttk.Label(win,text=f'{n} cells | {meta["cols"]} columns × {meta["rows"]} rows | aperture {meta["diameter"]:.3f} mm\n20 × 20 mm at 2540 DPI. White=open. Print actual size.',padding=8).pack()
+        except Exception as e:messagebox.showerror('Mask export',str(e))
     def draw(self):
-        cv = self.canvas
-        cv.delete('all')
-        w,h = max(900,cv.winfo_width()),max(350,cv.winfo_height())
-        cv.create_text(18,23,text='Fixed repeated cell geometry + independently modulated inputs',fill='white',anchor='w',font=('TkDefaultFont',13,'bold'))
-        margin,gap = 18,12
-        cw = (w-2*margin-3*gap)/4
-        ch = (h-65-15)/2
-        for i in range(CELLS):
-            x,y = margin+(i%4)*(cw+gap),50+(i//4)*(ch+8)
-            cv.create_rectangle(x,y,x+cw,y+ch,outline='#475569',fill='#182338')
-            cv.create_text(x+10,y+16,text=f'Cell {i+1}',fill='#e2e8f0',anchor='w')
-            data = self.last_camera
-            inp = data['inputs'][i] if data else (0,0,0)
+        cv=self.canvas;cv.delete('all')
+        w=max(450,cv.winfo_width());n=self.display_cells
+        cols=min(n,max(1,int(w/260)));rows=math.ceil(n/cols)
+        cw=(w-24)/cols;ch=210
+        cv.configure(scrollregion=(0,0,w,rows*ch+40))
+        for i in range(n):
+            x,y=12+(i%cols)*cw,12+(i//cols)*ch
+            cv.create_rectangle(x,y,x+cw-10,y+ch-10,fill='#182338',outline='#475569')
+            cv.create_text(x+12,y+18,text=f'Cell {i+1}',fill='white',anchor='w')
+            data=self.last_camera;inp=data['inputs'][i] if data else (0,0,0)
             for j,label in enumerate(('a / A','b / A','carry / B')):
-                xx = x+22+j*(cw-40)/3
-                cv.create_rectangle(xx,y+33,xx+19,y+52,fill='#fbbf24' if inp[j] else '#0b1020',outline='#94a3b8')
-                cv.create_text(xx+9,y+65,text=label,fill='#94a3b8',font=('TkDefaultFont',9))
+                xx=x+20+j*(cw-50)/3
+                cv.create_oval(xx,y+36,xx+18,y+54,fill='#fbbf24' if inp[j] else '#080d19',outline='#94a3b8')
+                cv.create_text(xx,y+68,text=label,fill='#94a3b8',anchor='w',font=('TkDefaultFont',9))
             if data:
-                r,d = data['rows'][i],data['decoded'][i]
+                r,d=data['rows'][i],data['decoded'][i]
                 for j,(label,key) in enumerate((('signal','signal'),('ref A','refa'),('ref B','refb'))):
-                    yy = y+85+j*17
-                    cv.create_text(x+10,yy,text=label,fill='#94a3b8',anchor='w',font=('TkDefaultFont',9))
-                    left,right = x+63,x+cw-50
-                    cv.create_rectangle(left,yy-5,right,yy+5,fill='#0b1020',outline='')
+                    yy=y+94+j*23
+                    cv.create_text(x+12,yy,text=label,fill='#94a3b8',anchor='w')
+                    left,right=x+70,x+cw-58
+                    cv.create_rectangle(left,yy-5,right,yy+5,fill='#080d19',outline='')
                     cv.create_rectangle(left,yy-5,left+(right-left)*r[key],yy+5,fill='#34d399',outline='')
-                    cv.create_text(right+5,yy,text=f'{r[key]:.2f}',fill='white',anchor='w',font=('TkDefaultFont',9))
-                cv.create_text(x+10,y+ch-16,text=f'Camera level {d["level"]:.2f} → sum {d["sum"]}, carry {d["carry"]}',fill='#67e8f9',anchor='w',font=('TkDefaultFont',10))
-            else:
-                cv.create_text(x+10,y+100,text='No camera exposure yet',fill='#94a3b8',anchor='w')
+                    cv.create_text(right+4,yy,text=f'{r[key]:.2f}',fill='white',anchor='w',font=('TkDefaultFont',9))
+                cv.create_text(x+12,y+179,text=f'Level {d["level"]:.2f} → sum {d["sum"]}, carry {d["carry"]}',fill='#67e8f9',anchor='w',font=('TkDefaultFont',10))
+            else:cv.create_text(x+12,y+110,text='Ready for exposure',fill='#94a3b8',anchor='w')
 
-if __name__ == '__main__':
-    export_mask("mask")
+if __name__=='__main__':
     App().mainloop()
