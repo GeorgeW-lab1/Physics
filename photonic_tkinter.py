@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Generate and preview a nominal 20 x 20 mm fixed eight-cell aperture mask.
-Requires Pillow: python -m pip install pillow
-Run standalone, or import export_mask() from the simulation app.
-White=open, black=opaque. Fixed mask: no input or factor encodings.
+"""Launch beside reusable_ir_bench.py. Requires Pillow.
+python -m pip install pillow
+python reusable_ir_mask_png.py
+Exports a fixed, flat 2D eight-cell aperture mask, not a camera screenshot.
+White = open; black = opaque. Print at 100% scale, no fit-to-page.
+Nominal dimensions are layout choices, not validated optical specifications.
 """
 from pathlib import Path
-import csv
-from PIL import Image, ImageDraw
+import tkinter as tk
+from tkinter import ttk, messagebox
+try:
+    from PIL import Image, ImageDraw, ImageTk
+except ImportError:
+    raise SystemExit('Install Pillow: python -m pip install pillow')
+try:
+    from reusable_ir_bench import App
+except ImportError:
+    raise SystemExit('Place this file beside reusable_ir_bench.py.')
 
 DPI=2540  # Exactly 100 pixels/mm: 2000 pixels = 20 mm.
 SIZE_MM=20
@@ -40,40 +50,74 @@ def export_mask(folder):
     folder=Path(folder)
     folder.mkdir(parents=True,exist_ok=True)
     image,layout=make_mask()
-    path=folder/'physical_adder_mask_20x20mm.png'
+    path=folder/'physical_adder_mask_2x4_600dpi.png'
     image.save(path,dpi=(DPI,DPI))
-    with (folder/'aperture_coordinates_20x20mm.csv').open('w',newline='') as f:
+    import csv
+    with (folder/'physical_adder_mask_coordinates_mm.csv').open('w',newline='') as f:
         writer=csv.writer(f)
         writer.writerow(['cell','aperture','x_mm_from_left','y_mm_from_top'])
         writer.writerows(layout)
-    (folder/'mask_20x20mm_notes.txt').write_text(
-        'Nominal mask size: 20 x 20 mm. 2000 x 2000 pixels at 2540 DPI.\n'
-        'Print at actual size / 100%, not fit-to-page. Verify width with a ruler.\n'
-        'White=open, black=opaque. Eight identical cells arranged 2 rows x 4 columns.\n'
-        'Aperture diameter: nominal 0.4 mm (raster edge quantization applies).\n'
-        'Horizontal cell pitch 4.5 mm; vertical pitch 8 mm.\n'
-        'Three upper apertures: a,b,carry; two lower apertures: ref A,ref B.\n'
-        'Outside array: alignment crosses and an orientation square.\n'
-        'Layout only, not validated optical performance.\n'
-        'Requires programmable shutters, appropriate LED routing and resolved camera imaging.\n'
-        'Use transparent film / fabricated openings; verify opaque material blocks your IR wavelength.\n')
+    (folder/'physical_adder_mask_README.txt').write_text(
+        'FIXED PHYSICAL ADDER MASK\n'
+        '2 rows x 4 identical cells. White=open; black=opaque.\n'
+        'Nominal print size: 20 x 20 mm at 2540 DPI. Print at 100%, never fit-to-page.\n'
+        'Raster dimensions are rounded to whole pixels; verify scale with a ruler.\n'
+        'Five 1.5 mm nominal holes per cell: a,b,carry above; reference A,B below.\n'
+        '25 mm horizontal/vertical cell pitch. Four alignment crosses outside array.\n'
+        'Corner square identifies orientation. Coordinates measured from upper-left.\n'
+        'No factor/product table; no N-dependent geometry; all cells identical.\n'
+        'This is a proposed aperture layout, not an optical prescription or verified device.\n'
+        'Requires programmable shutters/SLM for a,b,carry, separate LED routing, and camera optics.\n'
+        'The camera sums the three signal aperture regions but measures references separately.\n'
+        'For transparent film: black must block the operating IR wavelength; verify experimentally.\n'
+        'The image is not an ordinary paper stencil: opaque paper would also block white regions.\n')
+    if not path.exists() or not path.stat().st_size:
+        raise OSError('Mask PNG export failed.')
     return path,image
 
-def main():
-    import tkinter as tk
-    from tkinter import ttk
-    from PIL import ImageTk
-    path,image=export_mask(Path(__file__).resolve().parent/'masks')
-    root=tk.Tk()
-    root.title('Physical mask — 20 mm × 20 mm')
-    preview=image.convert('RGB').resize((700,700),Image.Resampling.NEAREST)
-    photo=ImageTk.PhotoImage(preview)
-    label=ttk.Label(root,image=photo)
-    label.image=photo
-    label.pack(padx=10,pady=10)
-    ttk.Label(root,text='20 × 20 mm | 2 × 4 cells | 0.4 mm apertures | white = open',padding=6).pack()
-    ttk.Label(root,text=str(path),wraplength=700,padding=6).pack()
-    root.mainloop()
+class MaskApp(App):
+    def __init__(self):
+        self.mask_preview=None
+        self.user_stopping=False
+        super().__init__()
+        self.title('Reusable IR bench — physical 2D mask PNG')
+        ttk.Button(self,text='Export / show physical 2D mask PNG',command=self.show_mask).pack(pady=5)
+        # Export immediately and after each successful simulation.
+        self.after_idle(self.show_mask)
+    def finish(self):
+        success=(self.job is not None and self.last_camera is not None
+                 and not self.status.get().startswith('Stopped:') and not self.user_stopping)
+        super().finish()
+        if success:
+            self.after_idle(self.show_mask)
+    def stop(self):
+        self.user_stopping=True
+        try:
+            super().stop()
+        finally:
+            self.user_stopping=False
+    def show_mask(self):
+        try:
+            path,image=export_mask(Path(__file__).resolve().parent/'masks')
+            self.say('Physical 2D mask PNG saved: '+str(path))
+            if self.mask_preview is not None and self.mask_preview.winfo_exists():
+                self.mask_preview.lift()
+                return
+            win=tk.Toplevel(self)
+            self.mask_preview=win
+            win.title('Physical 2D aperture mask — white=open, black=opaque')
+            preview=image.convert('RGB')
+            preview.thumbnail((1000,650))
+            photo=ImageTk.PhotoImage(preview)
+            label=ttk.Label(win,image=photo)
+            label.image=photo
+            label.pack(padx=12,pady=12)
+            ttk.Label(win,text='2 × 4 identical cells | 110 × 65 mm nominal | 600 DPI | white = transmitting aperture',padding=5).pack()
+            ttk.Label(win,text='Upper apertures: a, b, carry. Lower apertures: reference A, reference B.\n'
+                'Printed PNG has no text or cell outlines inside the active mask.',padding=5).pack()
+            ttk.Label(win,text=str(path),wraplength=1000,padding=5).pack()
+        except Exception as e:
+            messagebox.showerror('Mask export failed',str(e))
 
 if __name__=='__main__':
-    main()
+    MaskApp().mainloop()
