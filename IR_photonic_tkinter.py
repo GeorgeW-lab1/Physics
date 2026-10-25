@@ -4,8 +4,11 @@ Install: python -m pip install pillow
 Run: python reusable_ir_bench.py
 Cells can be changed in the GUI (1..64); DEFAULT_CELLS sets the startup value.
 Modes: full-adder test, optical X+Y, trial-division factoring, and
-subset-sum with MINIMUM CELLS (one lane per distinct reachable sum <= T, run in chunks).
+subset-sum with MINIMUM CELLS (one lane per distinct reachable sum <= T, run in chunks;
+spare cells hold majority-vote replicas, or are blocked by the ITO plate).
 This is a hybrid intensity/feedback model, not an all-optical solver.
+An optional SIMULATED ITO IR-blocking plate (series element over the apertures) cuts
+closed-state leakage, rejects ambient IR, and blocks idle lanes; all plate numbers are assumptions.
 Programmable shutters, LED routing and camera calibration are required physically.
 Mask aperture diameter shrinks automatically if needed; geometry is unvalidated.
 """
@@ -15,7 +18,7 @@ from bisect import bisect_right
 import csv
 import tkinter as tk
 from tkinter import ttk, messagebox
-from collections import deque
+from collections import deque, Counter
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageTk
 
@@ -26,9 +29,10 @@ DPI = 2540
 SIZE_MM = 20
 PX_PER_MM = 100
 DIAMETER_MM = .7
+SHOT_K = .06  # ambient-IR shot-noise coefficient (simulation)
 RANDOM_MAX = 30000  # largest random element produced by Populate
 MAX_TARGET = 20_000_000  # planner bitset limit
-MAX_EXPOSURES = 1_50_000  # refuse runs estimated longer than this
+MAX_EXPOSURES = 1_500_000  # refuse runs estimated longer than this
 
 
 def grid_shape(cells):
@@ -87,6 +91,7 @@ def export_mask(folder, cells=DEFAULT_CELLS):
         'Upper holes a,b,carry; lower holes reference A,B.\n'
         'All occupied cells identical; no factors/products/subsets encoded.\n'
         'Subset assignment lives in the shutter pattern, not in the mask.\n'
+        'ITO IR-blocking plate is a simulation parameter set only; not part of this mask geometry.\n'
         'Proposed geometry only. Smaller holes require appropriate fabrication and imaging.\n'
         'Requires programmable shutters/SLM, separate LED routing and calibrated camera.\n'
         'Verify mask opacity at operating IR wavelength.\n')
@@ -153,53 +158,169 @@ def multiply(o, a, b):
     return acc
 
 
+class ITOPlate:
+    """Simulated ITO IR-blocking plate in series with every aperture.
+
+    extinction_db : attenuation of a blocked aperture (adds to the shutter's own leak)
+    loss          : fractional insertion loss of an open aperture
+    reject_db     : rejection of ambient/stray IR entering through the plate
+    tau_us        : electro-optic response time constant
+    settle_us     : wait before each exposure; unsettled apertures keep a residual of
+                    the previous state, exp(-settle/tau)
+    Idle lanes (chunk padding) are driven blocked, so they add no stray light.
+    All numbers are assumptions; real ITO gating is weaker and slower than a shutter.
+    """
+    def __init__(self, enabled=False, extinction_db=20., loss=.08, reject_db=15., tau_us=50., settle_us=250.):
+        self.enabled = bool(enabled)
+        self.extinction_db, self.loss = extinction_db, loss
+        self.reject_db, self.tau_us, self.settle_us = reject_db, tau_us, settle_us
+
+    @property
+    def p_on(self):
+        return 1.0 - self.loss
+
+    @property
+    def p_off(self):
+        return 10 ** (-self.extinction_db / 10)
+
+    @property
+    def ambient_factor(self):
+        return 10 ** (-self.reject_db / 10)
+
+    @property
+    def decay(self):
+        return math.exp(-self.settle_us / self.tau_us) if self.tau_us > 0 else 0.0
+
+    def step(self, cur, bit):
+        target = self.p_on if bit else self.p_off
+        return target + (cur - target) * self.decay
+
+
 class CameraBench:
-    def __init__(self, cells=DEFAULT_CELLS, exposure=.22, leak=.001, noise=.002, seed=1, led_a=True, led_b=True):
+    def __init__(self, cells=DEFAULT_CELLS, exposure=.22, leak=.001, noise=.002, seed=1, led_a=True, led_b=True,
+                 ito=None, ambient=.04, xtalk=.02):
         self.cells = cells
         self.exposure, self.leak, self.noise = exposure, leak, noise
         self.rng = random.Random(seed)
         self.led_a, self.led_b = led_a, led_b
+        self.ito = ito if ito is not None else ITOPlate(False)
+        self.ambient, self.xtalk = ambient, xtalk
+        self.itx = [[self.ito.p_off] * 5 for _ in range(cells)] if self.ito.enabled else None
+        self.pbits = [[0] * 5 for _ in range(cells)] if self.ito.enabled else None
         self.exposures = 0
         self.last = None
+        self.worst_margin = 0.0
+        self.err_sq, self.err_n = 0.0, 0
+        self.plate_time_us = 0.0
+        self.slots_useful = self.slots_replica = self.slots_idle = 0
+        self.corrected = 0  # lanes fixed by replica majority vote
 
-    def capture(self, inputs):
-        if len(inputs) != self.cells:
+    @property
+    def rms_error(self):
+        return math.sqrt(self.err_sq / self.err_n) if self.err_n else 0.0
+
+    def capture(self, inputs, active=None, replicas=0):
+        n = self.cells
+        if len(inputs) != n:
             raise ValueError(f'Exactly {self.cells} input cells required.')
+        act = [True] * n if active is None else list(active)
+        if len(act) != n:
+            raise ValueError(f'Exactly {n} active flags required.')
+        n_act = sum(act)
+        self.slots_useful += n_act - replicas
+        self.slots_replica += replicas
+        self.slots_idle += n - n_act
+        changed = False  # does any plate aperture need to switch this exposure?
+        ito = self.ito
+        use = ito.enabled
+        ambient = self.ambient * (ito.ambient_factor if use else 1.0)
+        dark = .01 + ambient
+        noise = math.sqrt(self.noise ** 2 + SHOT_K ** 2 * ambient)
+        pe = self.exposure
+        lit = sum(act) if use else n  # plate blocks idle lanes; without it every lane is lit
+        stray = self.xtalk * pe * lit / n
+        p_on = ito.p_on if use else 1.0
+        closed = self.leak * (ito.p_off if use else 1.0)  # closed-aperture transmission
+        lam = closed / p_on                                # closed/open ratio used by the decoder
+        A, B = float(self.led_a), float(self.led_b)
+        t = lambda x: self.leak + (1 - self.leak) * x
 
         def pixel(v):
-            return max(0., min(1., v + self.rng.gauss(0, self.noise)))
+            return max(0., min(1., v + self.rng.gauss(0, noise)))
         rows = []
-        for a, b, c in inputs:
+        for i, (a, b, c) in enumerate(inputs):
             if any(x not in (0, 1) for x in (a, b, c)):
                 raise ValueError('Binary inputs required.')
-            dark, p, A, B = .01, self.exposure, float(self.led_a), float(self.led_b)
-            t = lambda x: self.leak + (1 - self.leak) * x
-            rows.append(dict(signal=pixel(dark + p * (A * (t(a) + t(b)) + B * t(c))),
-                             black=pixel(dark), refa=pixel(dark + p * A), refb=pixel(dark + p * B),
-                             baseline=pixel(dark + p * self.leak * (2 * A + B))))
+            if use:
+                idle = not act[i]
+                bits = (0, 0, 0, 0, 0) if idle else (a, b, c, 1, 1)
+                st = self.itx[i]
+                if list(bits) != self.pbits[i]:
+                    changed = True
+                    self.pbits[i][:] = bits
+                for j in range(5):
+                    st[j] = ito.step(st[j], bits[j])
+                pa, pb, pc, pra, prb = st
+            else:
+                pa = pb = pc = pra = prb = 1.0
+            rows.append(dict(signal=pixel(dark + stray + pe * (A * (t(a) * pa + t(b) * pb) + B * t(c) * pc)),
+                             black=pixel(dark), refa=pixel(dark + stray + pe * A * pra),
+                             refb=pixel(dark + stray + pe * B * prb),
+                             baseline=pixel(dark + stray + pe * closed * (2 * A + B))))
         self.exposures += 1
+        if use and changed:  # settle wait only when some aperture actually switched
+            self.plate_time_us += ito.settle_us
         decoded = []
-        for row in rows:
-            A, B = row['refa'] - row['black'], row['refb'] - row['black']
-            if min(A, B) < .04 or abs(A - B) > .25 * max(A, B):
+        for i, row in enumerate(rows):
+            if use and not act[i]:
+                decoded.append(dict(level=0.0, k=0, sum=0, carry=0))
+                continue
+            Ar, Br = row['refa'] - row['black'], row['refb'] - row['black']
+            if min(Ar, Br) < .04 or abs(Ar - Br) > .25 * max(Ar, Br):
                 raise RuntimeError('Insufficient/unequal LED references.')
-            level = (row['signal'] - row['baseline']) / ((A + B) / 2 * (1 - self.leak))
+            level = (row['signal'] - row['baseline']) / ((Ar + Br) / 2 * (1 - lam))
             k = round(level)
+            self.worst_margin = max(self.worst_margin, abs(level - k))
+            self.err_sq += (level - k) ** 2
+            self.err_n += 1
             if row['signal'] > .98 or not 0 <= k <= 3 or abs(level - k) > .35:
-                raise RuntimeError('Ambiguous/saturated camera level. Adjust exposure/noise.')
+                raise RuntimeError('Ambiguous/saturated camera level. Adjust exposure/noise/plate.')
             decoded.append(dict(level=level, k=k, sum=k % 2, carry=int(k >= 2)))
         self.last = dict(inputs=list(inputs), rows=rows, decoded=decoded)
         return decoded
 
 
-def optical_add(bench, x, y, width):
+def ito_ab_test(base, plate_kw, cells=64, exposures=2000, seed=7):
+    """Same random full-adder exposures with and without the ITO plate.
+    A quarter of the lanes are idle (like chunk padding)."""
+    out = {}
+    for label, enabled in (('without plate', False), ('with plate', True)):
+        bench = CameraBench(cells, ito=ITOPlate(enabled, **plate_kw), **base)
+        rng = random.Random(seed)
+        active = [i < cells - cells // 4 for i in range(cells)]
+        aborted = wrong = 0
+        for _ in range(exposures):
+            inputs = [(rng.getrandbits(1), rng.getrandbits(1), rng.getrandbits(1)) if active[i] else (0, 0, 0)
+                      for i in range(cells)]
+            try:
+                dec = bench.capture(inputs, active)
+            except RuntimeError:
+                aborted += 1
+                continue
+            wrong += sum(1 for i in range(cells) if active[i] and dec[i]['k'] != sum(inputs[i]))
+        out[label] = dict(aborted=aborted, wrong=wrong, worst=bench.worst_margin, rms=bench.rms_error,
+                          plate_ms=bench.plate_time_us / 1000)
+    return out
+
+
+def optical_add(bench, x, y, width, active=None, replicas=0):
     n = bench.cells
     if len(x) != n or len(y) != n:
         raise ValueError(f'{n} lanes required.')
     carry, result = [0] * n, [0] * n
     for k in range(width):
         inputs = [((x[i] >> k) & 1, (y[i] >> k) & 1, carry[i]) for i in range(n)]
-        ds = bench.capture(inputs)
+        ds = bench.capture(inputs, active, replicas)
         for i, d in enumerate(ds):
             result[i] |= d['sum'] << k
             carry[i] = d['carry']
@@ -230,7 +351,7 @@ def factor_job(bench, N, report):
         report(f'Electronic scheduler: trial divisors {batch}')
         while any(active):
             increments = [divisors[i] if active[i] else 0 for i in range(n)]
-            sums = yield from optical_add(bench, sums, increments, W)
+            sums = yield from optical_add(bench, sums, increments, W, list(active))  # finished/idle lanes get plate-blocked
             hits = []
             for i in range(n):
                 if not active[i]:
@@ -253,7 +374,7 @@ def truth_job(bench, report):
         ids = list(range(start, min(8, start + n)))
         inputs = [((i >> 2) & 1, (i >> 1) & 1, i & 1) for i in ids]
         inputs += [(0, 0, 0)] * (n - len(inputs))
-        decoded = bench.capture(inputs)
+        decoded = bench.capture(inputs, [j < len(ids) for j in range(n)])  # unused lanes plate-blocked
         yield dict(bit=0, width=1)
         for j, i in enumerate(ids):
             if decoded[j]['k'] != sum(inputs[j]):
@@ -266,12 +387,14 @@ def popcount(v):
     return v.bit_count() if hasattr(v, 'bit_count') else bin(v).count('1')
 
 
-def plan_subset(S, T):
+def plan_subset(S, T, copies=1):
     """CPU planner: how many lanes does each stage need, and how many cells?
 
     Lane = one distinct reachable sum r <= T - s that must be fed into an adder.
-    Minimum cells = peak lanes over all stages (capped at MAX_CELLS; larger
-    stages are simply run in several chunks). Uses a big-int bitset.
+    Cells = peak lanes x copies (capped at MAX_CELLS). Each lane is run on
+    `copies` cells so the camera results can be majority-voted; stages that
+    don't fill the cells reuse the spare cells as extra copies. Larger stages
+    run in several chunks. Uses a big-int bitset.
     """
     if T > MAX_TARGET:
         raise ValueError(f'Target T too large for the planner (max {MAX_TARGET:,}).')
@@ -287,26 +410,31 @@ def plan_subset(S, T):
         lanes.append(popcount(feed))
         reach |= feed << s
     peak = max(lanes, default=1)
-    n = max(1, min(peak, MAX_CELLS))
-    groups = sum(-(-l // n) for l in lanes)
-    return dict(W=W, n=n, peak=peak, lanes=lanes, exposures=groups * W,
+    n = max(1, min(peak * copies, MAX_CELLS))
+    per = max(1, n // copies)  # distinct lanes per chunk
+    groups = sum(-(-l // per) for l in lanes)
+    return dict(W=W, n=n, peak=peak, lanes=lanes, per=per, copies=copies, exposures=groups * W,
                 solvable=bool((reach >> T) & 1))
 
 
-def subset_sum_job(bench, S, T, report):
-    """Minimum-cell subset sum.
+def subset_sum_job(bench, S, T, report, copies=1, redundant=True):
+    """Minimum-cell subset sum that uses every cell and the ITO plate.
 
     State = set of distinct reachable sums (each a lane). For every element s,
     the CPU feeds the lanes with r <= T - s into the optical adder (r + s),
     decodes the camera result, and keeps sums not seen before. Lanes beyond
-    the physical cell count run in chunks. Stops as soon as T is reached.
+    the chunk size run in further chunks. Spare cells either hold replicas of
+    the lanes (redundant=True: results are majority-voted) or are idle and
+    blocked by the ITO plate (redundant=False). Stops as soon as T is reached.
     Returns the list of chosen element indices, or None.
     """
     n = bench.cells
+    per = max(1, n // copies)
     W = max(1, T.bit_length())  # r + s <= T < 2**W: overflow impossible
     parent = {0: -1}  # sum -> index of the element that first produced it
     order = [0]       # sorted reachable sums
-    report(f'Minimum-cell subset sum: {n} cells, W={W} bits, {len(S)} elements')
+    report(f'Minimum-cell subset sum: {n} cells, {per} lanes/chunk, W={W} bits, {len(S)} elements, '
+           f'spare cells: {"vote replicas" if redundant else "plate-blocked"}')
     for j, s in enumerate(S):
         if T in parent:
             break
@@ -314,13 +442,16 @@ def subset_sum_job(bench, S, T, report):
             continue
         feed = order[:bisect_right(order, T - s)]
         new = []
-        for start in range(0, len(feed), n):
-            chunk = feed[start:start + n]
-            pad = n - len(chunk)
-            x = chunk + [0] * pad
-            y = [s] * len(chunk) + [0] * pad
-            labels = [f'{r}+{s}' for r in chunk] + [''] * pad
-            gen = optical_add(bench, x, y, W)
+        for start in range(0, len(feed), per):
+            chunk = feed[start:start + per]
+            L = len(chunk)
+            src = [i % L for i in range(n)] if redundant else list(range(L)) + [None] * (n - L)
+            x = [chunk[k] if k is not None else 0 for k in src]
+            y = [s if k is not None else 0 for k in src]
+            labels = [(f'{chunk[k]}+{s}' + (' ↻' if i >= L else '')) if k is not None else ''
+                      for i, k in enumerate(src)]
+            act = [k is not None for k in src]
+            gen = optical_add(bench, x, y, W, act, (n - L) if redundant else 0)
             while True:
                 try:
                     e = next(gen)
@@ -328,10 +459,20 @@ def subset_sum_job(bench, S, T, report):
                     res = stop.value
                     break
                 e['stage'] = (f'element {j + 1}/{len(S)} (s={s}), '
-                              f'lanes {start + 1}-{start + len(chunk)} of {len(feed)}')
+                              f'lanes {start + 1}-{start + L} of {len(feed)}, {n // L if redundant else 1} cop.')
                 e['labels'] = labels
                 yield e
-            for r, v in zip(chunk, res):
+            for i, r in enumerate(chunk):
+                vals = [res[q] for q in range(i, n, L)] if redundant else [res[i]]
+                if len(vals) > 1:
+                    top, cnt = Counter(vals).most_common(1)[0]
+                    if 2 * cnt <= len(vals):
+                        raise RuntimeError(f'Replica disagreement for {r}+{s}: {vals}')
+                    if cnt < len(vals):
+                        bench.corrected += 1
+                    v = top
+                else:
+                    v = vals[0]
                 if v != r + s:
                     raise RuntimeError(f'Optical/CPU mismatch: {r}+{s} decoded as {v}')
                 if v not in parent:
@@ -373,12 +514,15 @@ class App(tk.Tk):
         self.title('Variable-cell IR bench + 20 mm mask PNG')
         self.geometry('1300x880')
         self.vars = {k: tk.StringVar(value=str(v)) for k, v in dict(
-            cells=DEFAULT_CELLS, N=143, x=11, y=13, S='3,5,7,11', T=15, count=64,
-            exposure=.22, leak=.001, noise=.002, seed=1, delay=5).items()}
+            cells=DEFAULT_CELLS, N=143, x=11, y=13, S='3,5,7,11', T=15, count=32, copies=1,
+            exposure=.22, leak=.001, noise=.002, seed=1, delay=5,
+            ambient=.04, ito_er=20, ito_loss=8, ito_rej=15, ito_tau=50, ito_settle=250).items()}
 
         self.vars['cells'].trace_add('write', self.on_cells_changed)
 
         self.A, self.B = tk.BooleanVar(value=True), tk.BooleanVar(value=True)
+        self.ITO = tk.BooleanVar(value=True)
+        self.REPL = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value='Set Cells, then run. Mask and arithmetic use the same count.')
         self.job = None
         self.last_camera = None
@@ -391,7 +535,7 @@ class App(tk.Tk):
         top.pack(fill='x')
         self.entries = []
         labels = [('cells', 'Cells (1–1024)'), ('N', 'Factor N'), ('x', 'Adder X'), ('y', 'Adder Y'),
-                  ('S', 'Subset set S'), ('T', 'Target T'), ('count', 'Count (1–512)'), ('exposure', 'Exposure'), ('leak', 'Leak'),
+                  ('S', 'Subset set S'), ('T', 'Target T'), ('count', 'Count (1–32)'), ('copies', 'Copies (1–9)'), ('exposure', 'Exposure'), ('leak', 'Leak'),
                   ('noise', 'Noise σ'), ('seed', 'Seed'), ('delay', 'Delay ms')]
         for j, (key, label) in enumerate(labels):
             ttk.Label(top, text=label).grid(row=0, column=j, padx=3)
@@ -404,6 +548,18 @@ class App(tk.Tk):
             entry.grid(row=1, column=j, padx=3)
             self.entries.append(entry)
 
+        ito_bar = ttk.Frame(self, padding=(8, 0))
+        ito_bar.pack(fill='x')
+        ttk.Checkbutton(ito_bar, text='ITO IR-blocking plate (simulated, next run)', variable=self.ITO).grid(row=1, column=0, padx=3)
+        for j, (key, label) in enumerate([('ambient', 'Ambient IR'), ('ito_er', 'Block ER dB'), ('ito_loss', 'Open loss %'),
+                                          ('ito_rej', 'Ambient reject dB'), ('ito_tau', 'Plate τ µs'),
+                                          ('ito_settle', 'Settle µs')], start=1):
+            ttk.Label(ito_bar, text=label).grid(row=0, column=j, padx=3)
+            entry = ttk.Entry(ito_bar, textvariable=self.vars[key], width=10)
+            entry.grid(row=1, column=j, padx=3)
+            self.entries.append(entry)
+        ttk.Checkbutton(ito_bar, text='Spare cells = vote replicas (off: plate-blocked)', variable=self.REPL).grid(row=1, column=7, padx=8)
+
         bar = ttk.Frame(self, padding=8)
         bar.pack(fill='x')
         self.buttons = []
@@ -411,7 +567,8 @@ class App(tk.Tk):
                                ('Optical X + Y', lambda: self.start('add')),
                                ('Factor N (hybrid)', lambda: self.start('factor')),
                                ('Populate random S', self.populate),
-                               ('Subset sum (1 adder/subset)', lambda: self.start('subset')),
+                               ('Subset sum (min cells)', lambda: self.start('subset')),
+                               ('ITO A/B test', self.ito_ab),
                                ('Export/show mask PNG', self.show_mask)]:
             b = ttk.Button(bar, text=label, command=command)
             b.pack(side='left', padx=4)
@@ -481,7 +638,11 @@ class App(tk.Tk):
         shown = S if k <= 12 else f'{S[:8]}… ({k} numbers)'
         note = f'Populated S={shown}, T={T} (sum of a random subset, so a solution exists).'
         try:
-            plan = plan_subset(S, T)
+            try:
+                copies = max(1, min(9, int(self.vars['copies'].get())))
+            except ValueError:
+                copies = 1
+            plan = plan_subset(S, T, copies)
             self.vars['cells'].set(str(plan['n']))  # minimum cells; keeps mask preview in sync
             note += f' Minimum cells: {plan["n"]} (peak {plan["peak"]} lanes), ~{plan["exposures"]:,} exposures.'
             if plan['exposures'] > MAX_EXPOSURES:
@@ -489,6 +650,22 @@ class App(tk.Tk):
         except ValueError as e:
             note += f' {e}'
         self.say(note)
+
+    def ito_ab(self):
+        if self.job is not None:
+            return
+        try:
+            self.params('add')  # validates fields and fills base_kw / plate_kw
+        except ValueError as e:
+            messagebox.showerror('Input', str(e))
+            return
+        res = ito_ab_test(self.base_kw, self.plate_kw)
+        for label, r in res.items():
+            self.say(f'ITO A/B {label}: {r["aborted"]} aborted, {r["wrong"]} wrong decodes, '
+                     f'worst margin {r["worst"]:.2f}, rms level error {r["rms"]:.3f}, plate time {r["plate_ms"]:.0f} ms')
+        w, p = res['without plate'], res['with plate']
+        self.status.set(f'ITO A/B (64 lanes, 2000 exposures, 25% idle): rms error {w["rms"]:.3f} → {p["rms"]:.3f}; '
+                        f'aborted {w["aborted"]} → {p["aborted"]}; wrong {w["wrong"]} → {p["wrong"]}')
 
     def say(self, s):
         self.log_lines.append(s)
@@ -514,7 +691,11 @@ class App(tk.Tk):
             T = int(self.vars['T'].get())
             if T < 0:
                 raise ValueError('Target T must be >= 0.')
-            self.plan = plan_subset(S, T)
+            copies = int(self.vars['copies'].get())
+            if not 1 <= copies <= 9:
+                raise ValueError('Copies must be 1..9.')
+            self.copies = copies
+            self.plan = plan_subset(S, T, copies)
             if self.plan['exposures'] > MAX_EXPOSURES:
                 raise ValueError(f'Needs ~{self.plan["exposures"]:,} exposures (limit {MAX_EXPOSURES:,}). '
                                  'Lower Count/random max or use a smaller target.')
@@ -529,7 +710,16 @@ class App(tk.Tk):
         delay = int(self.vars['delay'].get())
         if not 0 <= delay <= 1000:
             raise ValueError('Delay: 0–1000 ms.')
-        bench = CameraBench(n, p, l, z, int(self.vars['seed'].get()), self.A.get(), self.B.get())
+        amb, er, loss, rej, tau, settle = [float(self.vars[k].get()) for k in
+                                           ('ambient', 'ito_er', 'ito_loss', 'ito_rej', 'ito_tau', 'ito_settle')]
+        if not all(math.isfinite(v) for v in (amb, er, loss, rej, tau, settle)):
+            raise ValueError('ITO/ambient values must be finite numbers.')
+        if not (0 <= amb <= .5 and 0 <= er <= 60 and 0 <= loss <= 50 and 0 <= rej <= 60 and tau >= 0 and settle >= 0):
+            raise ValueError('Ambient 0–0.5, ER 0–60 dB, loss 0–50 %, reject 0–60 dB, τ/settle ≥ 0.')
+        self.plate_kw = dict(extinction_db=er, loss=loss / 100, reject_db=rej, tau_us=tau, settle_us=settle)
+        self.base_kw = dict(exposure=p, leak=l, noise=z, seed=int(self.vars['seed'].get()),
+                            led_a=self.A.get(), led_b=self.B.get(), ambient=amb)
+        bench = CameraBench(n, ito=ITOPlate(self.ITO.get(), **self.plate_kw), **self.base_kw)
         return N, x, y, S, T, delay, bench
 
     def start(self, mode):
@@ -542,6 +732,10 @@ class App(tk.Tk):
             return
         self.mode = mode
         self.display_cells = self.bench.cells
+        pl = self.bench.ito
+        if pl.enabled:
+            self.say(f'ITO plate on: block {pl.extinction_db:.0f} dB, open loss {pl.loss * 100:.0f}%, ambient reject {pl.reject_db:.0f} dB, '
+                     f'tau {pl.tau_us:.0f} us, settle {pl.settle_us:.0f} us (only waited when apertures switch)')
         self.last_camera = None
         self.cell_labels = []
 
@@ -568,7 +762,7 @@ class App(tk.Tk):
         elif mode == 'add':
             self.job = optical_add(self.bench, [self.x] * n, [self.y] * n, max(W, self.N.bit_length(), (self.x + self.y).bit_length() + 1))
         elif mode == 'subset':
-            self.job = subset_sum_job(self.bench, self.S, self.T, self.say)
+            self.job = subset_sum_job(self.bench, self.S, self.T, self.say, self.copies, self.REPL.get())
         else:
             self.job = truth_job(self.bench, self.say)
         self.after(1, self.tick)
@@ -582,7 +776,7 @@ class App(tk.Tk):
             if 'labels' in e:
                 self.cell_labels = e['labels']
             stage = f' | {e["stage"]}' if 'stage' in e else ''
-            self.status.set(f'{self.mode}: {self.bench.cells} cells | exposure {self.bench.exposures} | bit {e["bit"] + 1}/{e["width"]}{stage}')
+            self.status.set(f'{self.mode}: {self.bench.cells} cells | exposure {self.bench.exposures} | bit {e["bit"] + 1}/{e["width"]} | margin {self.bench.worst_margin:.2f}{stage}')
             self.draw()
             self.after(self.delay, self.tick)
         except StopIteration as e:
@@ -590,7 +784,8 @@ class App(tk.Tk):
             if self.mode == 'factor':
                 msg = f'Camera-derived candidate: {self.N} = {r[0]} × {r[1]}' if r else 'No divisor detected; a noisy search is not a primality certificate.'
             elif self.mode == 'add':
-                msg = f'Camera-derived sum: {self.x} + {self.y} → {r[0]}; {len(r)} lanes'
+                top, cnt = Counter(r).most_common(1)[0]  # every cell computes X+Y; majority vote
+                msg = f'Camera-derived sum: {self.x} + {self.y} → {top}; {cnt}/{len(r)} lanes agree'
             elif self.mode == 'subset':
                 if r is not None:
                     vals = [self.S[k] for k in r]
@@ -602,6 +797,14 @@ class App(tk.Tk):
                 msg = r
             self.status.set(msg + f' | {self.bench.exposures} exposures')
             self.say(self.status.get())
+            self.say(f'Decode: worst margin {self.bench.worst_margin:.2f}, rms level error {self.bench.rms_error:.3f}; '
+                     f'ITO {"on" if self.bench.ito.enabled else "off"}, plate settle time {self.bench.plate_time_us / 1000:.1f} ms')
+            bn = self.bench
+            tot = bn.slots_useful + bn.slots_replica + bn.slots_idle
+            if tot:
+                self.say(f'Cell use: {100 * bn.slots_useful / tot:.0f}% useful, {100 * bn.slots_replica / tot:.0f}% vote replicas '
+                         f'({bn.corrected} lanes corrected), {100 * bn.slots_idle / tot:.0f}% idle '
+                         f'({"plate-blocked" if bn.ito.enabled else "lit but unused"})')
             self.finish()
             self.show_mask(self.bench.cells)
         except Exception as e:
