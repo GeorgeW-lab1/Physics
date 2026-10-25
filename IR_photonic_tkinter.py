@@ -330,25 +330,31 @@ def optical_add(bench, x, y, width, active=None, replicas=0):
     return result
 
 
+def plan_factor(N):
+    """Best-case cost of trial-division by repeated optical addition.
+
+    Lane d reaches N after about N/d additions, each W exposures wide, so even
+    finding the largest possible divisor (isqrt(N)) needs about sqrt(N) * W
+    exposures. Used only to refuse runs that can never finish.
+    """
+    hi = max(2, math.isqrt(N))
+    W = (N + 2).bit_length()
+    return dict(hi=hi, lower=(N // hi) * W)
+
+
 def factor_job(bench, N, report):
+    """Trial division with one divisor per cell, batched lazily (no giant lists)."""
     n = bench.cells
-    wa = max(2, (n + 1) // 2)
-    wb = max(2, n - 1)
-    W = wa + wb
-
-    amax, bmax = (1 << wa) - 1, (1 << wb) - 1
-    report(f'Dynamic bit allocation: wa={wa} bits, wb={wb} bits (Total W={W} bits, Cells={n})')
-
-    candidates = list(range(2, min(amax + 1, math.isqrt(N) + 1)))
-    if not candidates:
-        candidates = [2]
-
-    for start in range(0, len(candidates), n):
-        batch = candidates[start:start + n]
+    hi = max(2, math.isqrt(N))
+    d = 2
+    while d <= hi:
+        batch = list(range(d, min(d + n, hi + 1)))
+        d += n
         active = [i < len(batch) for i in range(n)]
         divisors = batch + [0] * (n - len(batch))
+        W = (N + batch[-1]).bit_length()  # sums stay below N + divisor
         sums, counts = [0] * n, [0] * n
-        report(f'Electronic scheduler: trial divisors {batch}')
+        report(f'Trial divisors {batch[0]}..{batch[-1]} ({len(batch)} lanes), W={W} bits')
         while any(active):
             increments = [divisors[i] if active[i] else 0 for i in range(n)]
             sums = yield from optical_add(bench, sums, increments, W, list(active))  # finished/idle lanes get plate-blocked
@@ -514,7 +520,7 @@ class App(tk.Tk):
         self.title('Variable-cell IR bench + 20 mm mask PNG')
         self.geometry('1300x880')
         self.vars = {k: tk.StringVar(value=str(v)) for k, v in dict(
-            cells=DEFAULT_CELLS, N=143, x=11, y=13, S='3,5,7,11', T=15, count=32, copies=1,
+            cells=DEFAULT_CELLS, N=143, x=11, y=13, S='3,5,7,11', T=15, count=64, copies=1,
             exposure=.22, leak=.001, noise=.002, seed=1, delay=5,
             ambient=.04, ito_er=20, ito_loss=8, ito_rej=15, ito_tau=50, ito_settle=250).items()}
 
@@ -535,7 +541,7 @@ class App(tk.Tk):
         top.pack(fill='x')
         self.entries = []
         labels = [('cells', 'Cells (1–1024)'), ('N', 'Factor N'), ('x', 'Adder X'), ('y', 'Adder Y'),
-                  ('S', 'Subset set S'), ('T', 'Target T'), ('count', 'Count (1–32)'), ('copies', 'Copies (1–9)'), ('exposure', 'Exposure'), ('leak', 'Leak'),
+                  ('S', 'Subset set S'), ('T', 'Target T'), ('count', 'Count (1–512)'), ('copies', 'Copies (1–9)'), ('exposure', 'Exposure'), ('leak', 'Leak'),
                   ('noise', 'Noise σ'), ('seed', 'Seed'), ('delay', 'Delay ms')]
         for j, (key, label) in enumerate(labels):
             ttk.Label(top, text=label).grid(row=0, column=j, padx=3)
@@ -610,10 +616,7 @@ class App(tk.Tk):
                 self.last_camera = None
                 self.cell_labels = []
 
-                wa = max(2, (n + 1) // 2)
-                wb = max(2, n - 1)
-                W = wa + wb
-                self.status.set(f'Cells updated to {n} | Dynamic Bit Widths: wa={wa}, wb={wb}, total W={W}')
+                self.status.set(f'Cells updated to {n}')
 
                 self.draw()
                 if self.mask_window is not None and self.mask_window.winfo_exists():
@@ -704,6 +707,11 @@ class App(tk.Tk):
             N, x, y = [int(self.vars[k].get()) for k in ('N', 'x', 'y')]
             if not 4 <= N or not 0 <= x or not 0 <= y:
                 raise ValueError('N must be >= 4; X/Y must be >= 0.')
+            if mode == 'factor':
+                fp = plan_factor(N)
+                if fp['lower'] > MAX_EXPOSURES:
+                    raise ValueError(f'N is too large for trial division by addition: even the best case needs '
+                                     f'~{fp["lower"]:.3e} exposures (limit {MAX_EXPOSURES:,}).')
         p, l, z = [float(self.vars[k].get()) for k in ('exposure', 'leak', 'noise')]
         if not all(math.isfinite(v) for v in (p, l, z)) or not (0 <= p <= 1 and 0 <= l < .5 and 0 <= z <= 1):
             raise ValueError('Exposure 0–1, leak 0–<0.5, noise 0–1.')
@@ -753,14 +761,11 @@ class App(tk.Tk):
             e.configure(state='disabled')
 
         n = self.bench.cells
-        wa = max(2, (n + 1) // 2)
-        wb = max(2, n - 1)
-        W = wa + wb
 
         if mode == 'factor':
             self.job = factor_job(self.bench, self.N, self.say)
         elif mode == 'add':
-            self.job = optical_add(self.bench, [self.x] * n, [self.y] * n, max(W, self.N.bit_length(), (self.x + self.y).bit_length() + 1))
+            self.job = optical_add(self.bench, [self.x] * n, [self.y] * n, (self.x + self.y).bit_length() + 1)
         elif mode == 'subset':
             self.job = subset_sum_job(self.bench, self.S, self.T, self.say, self.copies, self.REPL.get())
         else:
