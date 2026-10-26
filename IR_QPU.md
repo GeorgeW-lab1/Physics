@@ -12,7 +12,7 @@ A hobbyist, bench-scale optical computing demonstrator. It computes using light:
 1. 4 photodiodes or CMOS sensor for visual verification
 1. 2 IR LED rows (input vector)
 2. IR diffusion plate
-3. Premade patterned ITO plate A (16 pixel pads)
+3. Premade patterned ITO plate (16 pixel pads)
 4. Upconversion card 
 
 ---
