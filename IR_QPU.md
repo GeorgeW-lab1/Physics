@@ -24,7 +24,6 @@ A hobbyist, bench-scale optical computing demonstrator. It computes using light:
 |---|---|---|
 | IR LEDs, **850 nm** (or 940 nm) | 2 (+2 spare) | 850 nm balances photodiode response and detector card transmission. |
 | **Premade patterned ITO plate**, 4×4 pixel pads (or ≥16 independent pads) | 1 (+1 spare) | Confirm pad count, pitch, and where the contact pads sit. |
-| **Premade common ITO plate** (unpatterned ITO glass) | 1
 | IR diffusion plate (ground glass / matte acrylic) | 1 | Verify it passes IR. |
 | IR detection / upconversion card | 1 | For alignment and debugging. Many cards respond poorly at 940 nm; 850 nm response is modest. |
 
