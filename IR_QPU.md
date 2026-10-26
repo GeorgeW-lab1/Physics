@@ -1,28 +1,19 @@
-# Build Guide: Desktop IR Photonic Processor (4×4 Optical Matrix-Vector Multiplier)
+# Build Guide: Desktop IR Photonic Processor (4×4 Optical Selective Upscaling)
 
-A hobbyist, bench-scale optical computing demonstrator. It computes **y = W·x** using light: IR LEDs encode the input vector, a pixelated ITO-electrode mask encodes the weight matrix, and photodiodes sum the transmitted light per output column. An Arduino host loads the data and reads back the result.
+A hobbyist, bench-scale optical computing demonstrator. It computes using light: IR LEDs encode the input vector, a pixelated ITO-electrode mask encodes the weight matrix, and photodiodes sum the transmitted light per output pixel. An Arduino host loads the data and reads back the result.
 
-> **Expectations.** This is a learning/demo device. Expect roughly 4–128 bits of effective precision, drift with temperature, and weight updates limited by the Indium Tin Oxide plate (tens of ms).
+> **Expectations.** This is a learning/demo device. Expect roughly 4–128 bits of effective precision depending on cells available, and weight updates limited by the Indium Tin Oxide plate (tens of ms).
 
 > **Revision note.** This version assumes the **ITO plates are premade** (already patterned into pixel pads). No laser engraving or etching is needed, so the laser engraver is removed from the parts list and Step 2 is now inspect, map, and wire.
 
 ---
 
-## 0. Design Overview
-
-```
- IR LEDs (x1..x4)      Diffuser      ITO/LC weight mask (W 4x4)     Photodiode columns
- [row inputs] ───────► spreads ────► pixel (i,j) transmits ───────► sum each column j
- PWM-driven            each LED      W_ij of light from row i       → ADC → y_j = Σ x_i·W_ij
- across one row        along its row
-```
-
 **Optical stack (front to back):**
-
+1. 4 photodiode columns or CMOS sensor for visual verification
 1. 2 IR LED rows (input vector)
 2. IR diffusion plate
 3. Premade patterned ITO plate A (16 pixel pads)
-4. 4 photodiode columns, plus optional upconversion card + CMOS sensor for visual verification
+4. Upconversion card 
 
 ---
 
@@ -35,9 +26,10 @@ A hobbyist, bench-scale optical computing demonstrator. It computes **y = W·x**
 | **Premade patterned ITO plate**, 4×4 pixel pads (or ≥16 independent pads) | 1 (+1 spare) | Confirm pad count, pitch, and where the contact pads sit. |
 | **Premade common ITO plate** (unpatterned ITO glass) | 1
 | IR diffusion plate (ground glass / matte acrylic) | 1 | Verify it passes IR. |
-| IR detection / upconversion card | 1 | For alignment and debugging. Many cards respond poorly at 940 nm; 850 nm response is modest. A phone camera also works for 850 nm. |
+| IR detection / upconversion card | 1 | For alignment and debugging. Many cards respond poorly at 940 nm; 850 nm response is modest. |
+
 | CMOS sensor module (Pi camera or USB webcam) | 1 | Remove the IR-cut filter if needed. Optional but useful. |
-| Photodiodes, | 4–8 | One per pixel, plus spares. |
+| Photodiodes, | 16 | One per pixel, plus spares. |
 
 ### Electronics
 | Item | Qty | Notes |
@@ -74,13 +66,6 @@ Draw a quick table of **pad number → grid position (row, column) → contact p
 5. Reinforce tape junctions with Kapton tape (outside the active pixel area).
 6. If your premade plates already have solder-ready or clip-ready contacts, skip the tape and use those.
 
-### 2.4 Connect to the Arduino drive electronics
-The TN cell must be driven with **AC (no net DC)** or the LC degrades quickly. Use a square wave of about 60–200 Hz.
-
-**Scheme:** plate B (common) gets a square wave `COM` from one Arduino pin. Each pixel pad gets `COM XOR state_n` through a 74HC86.
-
-- `state_n = 0`: in phase with COM → ~0 V across LC → relaxed state.
-- `state_n = 1`: inverted → ±Vcc across LC → driven state.
 
 ---
 
@@ -125,7 +110,7 @@ Make a rectangular tunnel with these pockets, in order along the optical axis:
 
 ## 5. Program the Host Controller (Offloading Algorithm)
 
-The host (a PC running Python) sends matrices and vectors over serial. The Arduino loads weights into the LC mask, drives the LEDs with the input vector, reads the photodiodes, and returns the result. The PC then calibrates it and compares against the digital answer.
+The host (a PC running Python) sends matrices and vectors over serial. The Arduino loads weights into the ITO mask, drives the LEDs with the input vector, reads the photodiodes, and returns the result. The PC then calibrates it and compares against the digital answer.
 
 ### 5.1 Calibrate first (essential)
 1. **Dark offset** `d_j`: LEDs off, read A0–A3.
