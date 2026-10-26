@@ -20,8 +20,7 @@ A hobbyist, bench-scale optical computing demonstrator. It computes using light:
 ## 1. Acquire Materials
 
 ### Optical
-| Item | Qty | Notes |
-|---|---|---|
+
 | IR LEDs, **850 nm** (or 940 nm) | 2 (+2 spare) | 850 nm balances photodiode response and detector card transmission. |
 | **Premade patterned ITO plate**, 4×4 pixel pads (or ≥16 independent pads) | 1 (+1 spare) | Confirm pad count, pitch, and where the contact pads sit. |
 | IR diffusion plate (ground glass / matte acrylic) | 1 | Verify it passes IR. |
