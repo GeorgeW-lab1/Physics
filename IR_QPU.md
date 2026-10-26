@@ -1,4 +1,4 @@
-# Build Guide: Desktop IR Photonic Processor (4×4 Optical Selective Upscaling)
+# Build Guide: Desktop IR Photonic Processor (4×4 Optical Selective upconversion)
 
 A hobbyist, bench-scale optical computing demonstrator. It computes using light: IR LEDs encode the input vector, a pixelated ITO-electrode mask encodes the weight matrix, and photodiodes sum the transmitted light per output pixel. An Arduino host loads the data and reads back the result.
 
