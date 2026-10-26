@@ -114,12 +114,6 @@ Make a rectangular tunnel with these pockets, in order along the optical axis:
 
 The host (a PC running Python) sends matrices and vectors over serial. The Arduino loads weights into the ITO mask, drives the LEDs with the input vector, reads the photodiodes, and returns the result. The PC then calibrates it and compares against the digital answer.
 
-### 5.1 Calibrate first (essential)
-1. **Dark offset** `d_j`: LEDs off, read A0–A3.
-2. **LED response:** sweep each LED's PWM 0–255 with all pixels open; fit a curve (LEDs aren't linear).
-3. **Pixel transmission** `T_ij(level)`: sweep each pixel's drive duty 0–100 % with one LED on; build a lookup table from desired weight to drive duty.
-4. **Crosstalk matrix:** light one LED at a time with all pixels open; any signal on other columns is crosstalk to subtract.
-
 
 ## Safety
 
