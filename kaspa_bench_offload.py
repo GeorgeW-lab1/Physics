@@ -68,10 +68,12 @@ except ImportError:
 
 
 ARDUINO_SKETCH = r"""
-// Arduino Mega 2560 - fully offloaded Kaspa kHeavyHash bench miner.
+// Raspberry Pi Pico / RP2040 - Kaspa kHeavyHash bench interface.
+// Build with the Earle Philhower Arduino-Pico core. Hashing remains experimental.
+// 8 photodiodes use a 74HC4051 analog mux; see README for wiring.
 //
-// Photodiodes: A0..A7
-// ITO pixels:  D2..D9, PWM 0..255
+// Photodiodes: 8:1 74HC4051 mux COM -> GP26/ADC0, select -> GP10/11/12
+// ITO pixels: GP2..GP9 (PWM-capable GPIO; external drivers recommended)
 //
 // PC -> Mega:
 //   PING
@@ -96,8 +98,18 @@ ARDUINO_SKETCH = r"""
 #define NUM_ITO 8
 #define NUM_PD 8
 
-static const int PHOTO_PINS[NUM_PD] = {A0, A1, A2, A3, A4, A5, A6, A7};
+static const int PHOTO_ADC_PIN = 26; // GP26 / ADC0
+static const int MUX_SELECT_PINS[3] = {10, 11, 12}; // S0, S1, S2 on 74HC4051
 static const int ITO_PINS[NUM_ITO] = {2, 3, 4, 5, 6, 7, 8, 9};
+
+static uint16_t sample_pd(int channel) {
+  channel &= 7;
+  for (int bit = 0; bit < 3; ++bit) {
+    digitalWrite(MUX_SELECT_PINS[bit], (channel >> bit) & 1);
+  }
+  delayMicroseconds(8); // allow mux and detector node to settle
+  return analogRead(PHOTO_ADC_PIN); // 12-bit reading when analogReadResolution(12) is supported
+}
 
 static uint8_t matrix[64][64];
 static bool matrix_loaded = false;
@@ -419,20 +431,20 @@ static void send_photodiodes() {
 
   for (int i = 0; i < NUM_PD; i++) {
     Serial.print(',');
-    Serial.print(analogRead(PHOTO_PINS[i]));
+    Serial.print(sample_pd(i));
   }
 
   Serial.println();
 }
 
 static void send_camera() {
-  // Default implementation: tile A0..A7 into an 8x8 frame.
+  // Default implementation: tile the 8 multiplexed photodiodes into an 8x8 frame.
   // Replace this with your actual camera-module capture code.
   uint8_t frame[64];
 
   for (int y = 0; y < 8; y++) {
     for (int x = 0; x < 8; x++) {
-      frame[y * 8 + x] = analogRead(PHOTO_PINS[x]) >> 2;
+      frame[y * 8 + x] = sample_pd(x) >> 2;
     }
   }
 
@@ -453,6 +465,12 @@ static void send_camera() {
 
 void setup() {
   Serial.begin(115200);
+  analogReadResolution(12);
+  for (int i = 0; i < 3; ++i) {
+    pinMode(MUX_SELECT_PINS[i], OUTPUT);
+    digitalWrite(MUX_SELECT_PINS[i], LOW);
+  }
+  pinMode(PHOTO_ADC_PIN, INPUT);
 
   for (int i = 0; i < NUM_ITO; i++) {
     pinMode(ITO_PINS[i], OUTPUT);
@@ -520,32 +538,65 @@ void loop() {
     matrix_loaded = true;
     Serial.println(F("OK,MATRIXROW"));
 
+  } else if (line.startsWith(F("SETITO "))) {
+    int values[NUM_ITO];
+    int pos = 7;
+    bool valid = true;
+    for (int i = 0; i < NUM_ITO; i++) {
+      while (pos < (int)line.length() && line.charAt(pos) == ' ') pos++;
+      if (pos >= (int)line.length()) {
+        valid = false;
+        break;
+      }
+      int end = line.indexOf(' ', pos);
+      if (end < 0) end = line.length();
+      String token = line.substring(pos, end);
+      for (unsigned int j = 0; j < token.length(); j++) {
+        if (!isDigit(token.charAt(j))) valid = false;
+      }
+      if (!valid || token.length() == 0) {
+        valid = false;
+        break;
+      }
+      values[i] = constrain(token.toInt(), 0, 255);
+      pos = end + 1;
+    }
+    while (pos < (int)line.length() && line.charAt(pos) == ' ') pos++;
+    if (pos < (int)line.length()) valid = false;
+    if (!valid) {
+      Serial.println(F("ERR,SETITO syntax"));
+      return;
+    }
+    for (int i = 0; i < NUM_ITO; i++) analogWrite(ITO_PINS[i], values[i]);
+    Serial.println(F("OK,SETITO"));
+
   } else if (line.startsWith(F("JOB "))) {
     if (!matrix_loaded) {
       Serial.println(F("ERR,MATRIX_NOT_LOADED"));
       return;
     }
 
+    // JOB has exactly five fields after the command:
+    // pre-PoW hash, timestamp, target, start nonce, count.
     int p1 = line.indexOf(' ', 4);
-    int p2 = line.indexOf(' ', p1 + 1);
-    int p3 = line.indexOf(' ', p2 + 1);
-    int p4 = line.indexOf(' ', p3 + 1);
-    int p5 = line.indexOf(' ', p4 + 1);
+    int p2 = (p1 >= 0) ? line.indexOf(' ', p1 + 1) : -1;
+    int p3 = (p2 >= 0) ? line.indexOf(' ', p2 + 1) : -1;
+    int p4 = (p3 >= 0) ? line.indexOf(' ', p3 + 1) : -1;
 
-    if (p5 < 0) {
+    if (p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0) {
       Serial.println(F("ERR,JOB syntax"));
       return;
     }
 
     if (!hex_to_bytes(line.substring(4, p1), pre_pow, 32) ||
-        !hex_to_bytes(line.substring(p3 + 1, p4), target, 32)) {
+        !hex_to_bytes(line.substring(p2 + 1, p3), target, 32)) {
       Serial.println(F("ERR,JOB hex"));
       return;
     }
 
     timestamp = parse_hex64(line.substring(p1 + 1, p2));
-    start_nonce = parse_hex64(line.substring(p4 + 1, p5));
-    uint64_t count = parse_hex64(line.substring(p5 + 1));
+    start_nonce = parse_hex64(line.substring(p3 + 1, p4));
+    uint64_t count = parse_hex64(line.substring(p4 + 1));
 
     uint64_t found_nonce = 0;
     uint8_t found_hash[32];
@@ -721,10 +772,12 @@ class MegaMiner:
                 continue
             if expected and line == expected:
                 return line
+            if line.startswith("ERR,"):
+                raise RuntimeError(f"Pico firmware error: {line}")
+            if expected is None:
+                return line
             if line.startswith("OK,"):
                 return line
-            if line.startswith("ERR,"):
-                raise RuntimeError(f"Arduino error: {line}")
         raise TimeoutError(f"No valid response to: {cmd[:80]}")
 
     def set_source(self, source: str) -> None:
@@ -734,11 +787,17 @@ class MegaMiner:
 
     def upload_matrix(self, matrix: np.ndarray) -> None:
         for row in range(64):
-            hex_row = "".join(f"{int(v):x}" for v in matrix[row])
+            hex_row = "".join(f"{int(v):02x}" for v in matrix[row])
             self.command(f"MATRIXROW {row} {hex_row}", "OK,MATRIXROW")
 
     def set_ito_every(self, n: int) -> None:
         self.command(f"ITOEVERY {max(1, int(n))}", "OK,ITOEVERY")
+
+    def set_ito(self, values) -> None:
+        values = [max(0, min(255, int(v))) for v in values]
+        if len(values) != 8:
+            raise ValueError("ITO pattern must contain exactly 8 values")
+        self.command("SETITO " + " ".join(str(v) for v in values), "OK,SETITO")
 
     def mine(self, pre_pow_hash: bytes, timestamp: int, target: bytes, start_nonce: int, count: int, timeout: float) -> dict:
         cmd = (
@@ -757,12 +816,12 @@ class MegaMiner:
                 _, nonce_s, hash_hex = line.split(",", 2)
                 return {
                     "found": True,
-                    "nonce": int(nonce_s),
+                    "nonce": int(nonce_s, 16),
                     "hash_hex": hash_hex.lower(),
                     "raw": line,
                 }
             if line.startswith("NONE,"):
-                return {"found": False, "nonces_tried": int(line.split(",")[1]), "raw": line}
+                return {"found": False, "nonces_tried": int(line.split(",")[1], 16), "raw": line}
             if line.startswith("ERR,"):
                 raise RuntimeError(f"Arduino error: {line}")
         raise TimeoutError("Mega mining job timed out")
@@ -826,6 +885,47 @@ def mine_via_bench(
         bench.set_ito_every(optical_every)
 
     start_time = time.perf_counter()
+    if source == "none":
+        attempted = 0
+        found_record = None
+        while attempted < max_nonces:
+            nonce = start_nonce + attempted
+            digest = kheavy_hash(pre_pow_hash, timestamp, nonce, matrix)
+            attempted += 1
+            if int.from_bytes(digest, "big") <= int.from_bytes(target, "big"):
+                found_record = {
+                    "nonce": nonce,
+                    "mega_hash_hex": digest.hex(),
+                    "pc_verification_hash_hex": digest.hex(),
+                    "verified_by_pc": True,
+                    "ito_pattern": list(digest[:8]),
+                    "target_hex": target.hex(),
+                    "pre_pow_hash_hex": pre_pow_hash.hex(),
+                    "timestamp": timestamp,
+                    "nonces_searched": attempted,
+                    "elapsed_s": time.perf_counter() - start_time,
+                    "bench_hashrate_approx": attempted / max(time.perf_counter() - start_time, 1e-9),
+                }
+                break
+        elapsed = time.perf_counter() - start_time
+        report = {
+            "solved": found_record is not None,
+            "solution": found_record,
+            "nonces_attempted": attempted,
+            "elapsed_s": elapsed,
+            "bench_hashrate_approx": attempted / max(elapsed, 1e-9),
+            "telemetry": None,
+            "source": source,
+            "port": None,
+            "batch_size": batch_size,
+            "optical_every": optical_every,
+            "csv": None,
+            "security_note": "CPU-only demonstration; no optical hardware performed or accelerated the hash computation.",
+        }
+        if found_record:
+            outdir.mkdir(parents=True, exist_ok=True)
+            (outdir / "kaspa_solution.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return report
     attempted = 0
     found_record = None
     telemetry = None
@@ -910,10 +1010,10 @@ def mine_via_bench(
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Kaspa kHeavyHash bench miner with Mega offload")
+    ap = argparse.ArgumentParser(description="Kaspa kHeavyHash bench miner with Raspberry Pi Pico offload")
     ap.add_argument("--mine", action="store_true")
     ap.add_argument("--source", choices=["photodiodes", "camera", "none"], default="none")
-    ap.add_argument("--port", help="Arduino Mega serial port")
+    ap.add_argument("--port", help="Raspberry Pi Pico USB serial port (e.g. COM7 or /dev/ttyACM0)")
     ap.add_argument("--baud", type=int, default=115200)
     ap.add_argument("--pre-pow-hash", help="32-byte pre-PoW hash, 64 hex chars")
     ap.add_argument("--work-order", help="80-byte work order, 160 hex chars")
@@ -923,7 +1023,7 @@ def main() -> int:
     ap.add_argument("--start-nonce", type=lambda x: int(x, 0), default=0)
     ap.add_argument("--batch-size", type=lambda x: int(x, 0), default=10_000)
     ap.add_argument("--max-nonces", type=lambda x: int(x, 0), default=1_000_000)
-    ap.add_argument("--optical-every", type=int, default=1000)
+    ap.add_argument("--optical-every", type=int, default=1)
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--outdir", default="kaspa_bench_offload_run")
     ap.add_argument("--emit-arduino", action="store_true")
@@ -932,7 +1032,7 @@ def main() -> int:
     if args.emit_arduino:
         p = Path("arduino_mega_kaspa_offload.ino")
         p.write_text(ARDUINO_SKETCH, encoding="utf-8")
-        print(f"Wrote Arduino sketch: {p}")
+        print(f"Wrote legacy Arduino sketch: {p}; use rpi_pico_kaspa_offload.ino for Pico hardware.")
         return 0
 
     if not args.mine:
