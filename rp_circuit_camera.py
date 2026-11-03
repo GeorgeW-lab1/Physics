@@ -226,7 +226,7 @@ class HiddenNumber:
             delay = nxt - time.perf_counter()
             if delay > 0:
                 self._stop.wait(delay)
-            elif delay < -0.01:                    # fell behind: do not burst to catch up
+            elif delay < -0.05:                    # fell behind: do not burst to catch up
                 nxt = time.perf_counter()
 
     # ---- the spot check, called when an even-state frame arrives
