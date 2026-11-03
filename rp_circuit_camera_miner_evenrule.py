@@ -50,6 +50,13 @@ process each frame concurrently as asyncio tasks; the flip-flop stage runs
 once both are finished. The whole pipeline lives in a background thread with
 its own asyncio loop and talks to Tk through a queue.Queue.
 
+Hidden-number test (separate from the SHA-256 miner): a secret integer is drawn in
+0..range-1. A separate clock thread cycles a candidate through that range at a frequency
+that wanders randomly (20 Hz to 2 kHz, re-drawn every 0.3 s). The thread never sees the
+secret. Only when an EVEN state arrives does the frame loop spot-check the candidate AT
+THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a mined
+macroblock) and a new secret is hidden. Expected hits = checks / range.
+
 Needs a real USB camera and OpenCV: motion comes only from what the camera
 sees. There is no simulated source; if the camera can't be opened, it says so.
 """
@@ -135,6 +142,114 @@ def mine_macroblock(header: bytes, start_nonce: int, size: int, difficulty: int)
         if hash_meets_difficulty(digest, difficulty):
             return True, nonce, digest.hex(), offset + 1, time.perf_counter() - t0
     return False, None, "", size, time.perf_counter() - t0
+
+
+# ------------------------------------------------------------------ hidden-number guesser
+HIDDEN_RANGE_DEFAULT = 1000
+HIDDEN_RANGE_MAX = 1_000_000
+GUESS_HZ_MIN, GUESS_HZ_MAX = 20.0, 2000.0     # the clock wanders between these
+GUESS_RETUNE_S = 0.3                          # how often a new frequency is drawn
+
+
+class HiddenNumber:
+    """A secret integer in [0, size) and a separate thread that clock-cycles a candidate
+    through the same range at a randomly varying frequency.
+
+    The thread only counts. It never compares against the secret. The comparison happens
+    in spot_check(), which the frame loop calls when an even state arrives: it reads the
+    candidate AT THAT INSTANT (no scanning, no waiting) and reports whether it equals the
+    secret. So a hit is pure timing luck, with probability about 1/size per check."""
+
+    def __init__(self, size=HIDDEN_RANGE_DEFAULT, rng=None):
+        self._rng = rng or np.random.default_rng()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.size = 1
+        self.candidate = 0
+        self.hz = GUESS_HZ_MIN
+        self.ticks = 0
+        self.checks = 0
+        self.hits = 0
+        self.rounds = 0                     # how many secrets have been guessed so far
+        self.last_check = None              # (candidate, hit)
+        self._secret = 0
+        self.revealed = False
+        self.set_range(size)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    # ---- control
+    def start(self):
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def set_range(self, size: int):
+        """Change the range and draw a fresh secret."""
+        size = max(2, min(HIDDEN_RANGE_MAX, int(size)))
+        with self._lock:
+            self.size = size
+            self.candidate %= size
+            self._secret = int(self._rng.integers(0, size))
+            self.revealed = False
+
+    def new_secret(self):
+        with self._lock:
+            self._secret = int(self._rng.integers(0, self.size))
+            self.revealed = False
+
+    def reveal(self):
+        """Show the secret to the user (never used by the clock thread)."""
+        with self._lock:
+            self.revealed = True
+            return self._secret
+
+    # ---- the separate clock thread: cycles the candidate, frequency varies
+    def _run(self):
+        next_retune = 0.0
+        period = 1.0 / GUESS_HZ_MIN
+        nxt = time.perf_counter()
+        while not self._stop.is_set():
+            now = time.perf_counter()
+            if now >= next_retune:
+                # log-uniform frequency, so slow and fast regimes are equally likely
+                hz = 17
+                period = 1.0 / hz
+                next_retune = now + GUESS_RETUNE_S
+                with self._lock:
+                    self.hz = hz
+            with self._lock:
+                self.candidate = (self.candidate + 1) % self.size
+                self.ticks += 1
+            nxt += period
+            delay = nxt - time.perf_counter()
+            if delay > 0:
+                self._stop.wait(delay)
+            elif delay < -0.01:                    # fell behind: do not burst to catch up
+                nxt = time.perf_counter()
+
+    # ---- the spot check, called when an even-state frame arrives
+    def spot_check(self) -> bool:
+        with self._lock:
+            cand = self.candidate                  # the value on the clock right now
+            hit = cand == self._secret
+            self.checks += 1
+            self.last_check = (cand, hit)
+            if hit:
+                self.hits += 1
+                self.rounds += 1
+                self._secret = int(self._rng.integers(0, self.size))   # hide a new number
+                self.revealed = False
+            return hit
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(size=self.size, candidate=self.candidate, hz=self.hz,
+                        ticks=self.ticks, checks=self.checks, hits=self.hits,
+                        rounds=self.rounds, last_check=self.last_check,
+                        expected=(self.checks / self.size),
+                        secret=self._secret if self.revealed else None)
 
 
 # ------------------------------------------------------------------ time-code maths
@@ -461,6 +576,7 @@ class SimThread(threading.Thread):
 
     async def _run(self):
         ctl, out = self.ctl, self.out
+        hidden = ctl.get("hidden")
         try:
             src = Source(self.cam_index)
         except RuntimeError as e:
@@ -537,7 +653,7 @@ class SimThread(threading.Thread):
                  miner_queue=0, next_nonce=0,
                  last_difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
                  last_macroblock=int(ctl.get("macroblock", MACROBLOCK_DEFAULT)),
-                 pending_block=None, timecodes_added=0)
+                 pending_block=None, timecodes_added=0, hidden_timecodes=0)
 
         # Independent asynchronous miner queue/worker.
         miner_q = asyncio.Queue(maxsize=8)
@@ -563,6 +679,8 @@ class SimThread(threading.Thread):
                 mined_even=S["mined_even"],
                 skipped_per_second=S["skipped_per_second"],
                 timecodes_added=S["timecodes_added"],
+                hidden_timecodes=S["hidden_timecodes"],
+                hidden=S.get("hidden"),
                 timecode_pending=int(ctl.get("timecode_pending", 0)),
                 miner_queue=miner_q.qsize())
 
@@ -672,6 +790,20 @@ class SimThread(threading.Thread):
 
                 # The ONLY thing read to mine or skip is whether an even state exists.
                 even_state = x > 0 and x % 2 == 0
+
+                # Hidden-number test: only an even state triggers a spot check, and it reads
+                # the clock-cycled candidate at this very moment.
+                hidden_hit = False
+                if hidden is not None and ctl.get("hidden_on", True) and even_state:
+                    hidden_hit = hidden.spot_check()
+                    if hidden_hit:
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        S["hidden_timecodes"] += 1
+                        S["timecodes_added"] += 1
+                        out.put(("hidden_hit", dict(frame=idx, x=x, time=time.time(),
+                                                    snap=hidden.snapshot())))
+                if hidden is not None:
+                    S["hidden"] = hidden.snapshot()
                 if ctl.get("mining", True):
                     if even_state:
                         S["mined_even"] += 1
@@ -743,7 +875,7 @@ class SimThread(threading.Thread):
                     c_of_x=st.c_of_x, vC=st.vC, vB=st.vB, traj=st.traj,
                     node=st.node, orv=st.orv, andv=st.andv, gate=st.gate,
                     y_bin=st.y_bin, Q=st.Q, select=select, stats=dict(S),
-                    block_found=block_found, block_nonce=block_nonce,
+                    hidden_hit=hidden_hit, block_found=block_found, block_nonce=block_nonce,
                     block_digest=block_digest, block_time=block_time)))
                 idx += 1
         finally:
@@ -788,16 +920,94 @@ LOG_INTERVAL = 100                 # ms between log flushes
 MINER_INTERVAL = 0.2               # s between miner panel refreshes
 
 
+class ScrollFrame(ttk.Frame):
+    """A frame whose content scrolls (wheel + bars) when the window is smaller than it."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        self.vbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.hbar = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self.canvas.configure(yscrollcommand=self.vbar.set, xscrollcommand=self.hbar.set)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.vbar.grid(row=0, column=1, sticky="ns")
+        self.hbar.grid(row=1, column=0, sticky="ew")
+        self.inner = ttk.Frame(self.canvas)
+        self._win = self.canvas.create_window(0, 0, window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner)
+        self.canvas.bind("<Configure>", self._on_outer)
+        for w in (self.canvas, self.inner):
+            w.bind("<Enter>", self._bind_wheel)
+            w.bind("<Leave>", self._unbind_wheel)
+
+    def _on_inner(self, _e=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._toggle_bars()
+
+    def _on_outer(self, _e=None):
+        self._toggle_bars()
+
+    def _toggle_bars(self):
+        """Show a scrollbar only while the content really is bigger than the window."""
+        need_w = self.inner.winfo_reqwidth()
+        need_h = self.inner.winfo_reqheight()
+        have_w = self.canvas.winfo_width()
+        have_h = self.canvas.winfo_height()
+        if need_h > have_h + 1:
+            self.vbar.grid()
+        else:
+            self.vbar.grid_remove()
+            self.canvas.yview_moveto(0)
+        if need_w > have_w + 1:
+            self.hbar.grid()
+        else:
+            self.hbar.grid_remove()
+            self.canvas.xview_moveto(0)
+
+    def _bind_wheel(self, _e=None):
+        self.canvas.bind_all("<MouseWheel>", self._wheel)
+        self.canvas.bind_all("<Button-4>", self._wheel)
+        self.canvas.bind_all("<Button-5>", self._wheel)
+
+    def _unbind_wheel(self, _e=None):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _wheel(self, e):
+        # leave the wheel alone over spinboxes (it changes their value) and text boxes
+        if e.widget.winfo_class() in ("TSpinbox", "Text"):
+            return
+        if not self.vbar.winfo_ismapped():
+            return
+        step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+        self.canvas.yview_scroll(step * 3, "units")
+
+
 class App:
-    def __init__(self, root):
+    def __init__(self, window):
+        self.window = window                          # the real Tk window
+        window.title("RP circuit + asynchronous SHA-256 miner")
+        self.scroller = ScrollFrame(window)
+        self.scroller.pack(fill="both", expand=True)
+        root = self.scroller.inner                    # every widget below lives in here
         self.root = root
-        root.title("RP circuit + asynchronous SHA-256 miner")
+        root.after = window.after                     # keep timers on the real window
+        root.after_idle = window.after_idle
+        root.protocol = window.protocol
+        root.destroy = window.destroy
         self.q = queue.Queue()
         self.thread = None
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
                         mining=True, difficulty=DIFFICULTY_DEFAULT,
-                        macroblock=MACROBLOCK_DEFAULT, timecode_pending=0)
+                        macroblock=MACROBLOCK_DEFAULT, timecode_pending=0,
+                        hidden_on=True)
+        self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
+        self.hidden.start()
+        self.ctl["hidden"] = self.hidden
         self.block_count = 0
         self.last_block = None
         self.photos = [None, None, None]
@@ -810,10 +1020,11 @@ class App:
         self.code_info = dict(carries=0, wrapped=0, expr="1111")
         self.y_ok = True
 
-        root.resizable(True, True)
-        root.grid_columnconfigure(0, weight=0, minsize=730)
-        root.grid_columnconfigure(1, weight=1, minsize=440)
-        for r in range(4):
+        window.resizable(True, True)
+        root.grid_columnconfigure(0, weight=0, minsize=730)     # circuit diagram
+        root.grid_columnconfigure(1, weight=0, minsize=440)     # plots + verdict
+        root.grid_columnconfigure(2, weight=1, minsize=300)     # camera + analysis
+        for r in range(3):
             root.grid_rowconfigure(r, weight=0)
         self._last_render = 0.0
         self._last_miner = 0.0
@@ -829,35 +1040,78 @@ class App:
         self.boxes, self.wires = {}, {}
         self._diagram()
         self._right_panel()
-        bottom = ttk.Frame(root)
-        bottom.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=4)
-        self.cam = tk.Canvas(bottom, width=PW, height=PH, bg="black",
+        side = ttk.Frame(root)                         # column 2: camera over analysis
+        side.grid(row=1, column=2, sticky="n", padx=6, pady=4)
+        self.side = side
+        self.cam = tk.Canvas(side, width=PW, height=PH, bg="black",
                              highlightthickness=1, highlightbackground="#bbb")
-        self.cam.pack(side="left")
+        self.cam.pack(anchor="w")
         self.cam_img = self.cam.create_image(0, 0, anchor="nw")
         self.cam_text = self.cam.create_text(
             8, 8, anchor="nw", fill="#ffd54a", font=("Consolas", 10, "bold"),
             text="Live camera preview\n(press Preview only or Start circuit)")
         self.cam_photo = None
-        box, self.analysis = fixed_label(bottom, 350, PH, text="", font=("Consolas", 8),
-                                         justify="left", wraplength=340)
-        box.pack(side="left", anchor="n", padx=8)
-        self.log = tk.Text(bottom, height=14, width=40, font=("Consolas", 9), state="disabled",
-                           wrap="none")
-        self.log.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        box, self.analysis = fixed_label(side, PW, 290, text="", font=("Consolas", 8),
+                                         justify="left", wraplength=PW - 6)
+        box.pack(anchor="w", pady=(6, 0))
+        self.analysis_box = box
+        # the log sits in the miner row (see _miner_panel)
         self._y_changed()
         self._mining_changed()
+        self._compact = False
+        self.v_compact = tk.BooleanVar(value=False)
+        ttk.Checkbutton(self.ctl_row2, text="Compact (small screens)", variable=self.v_compact,
+                        command=self._apply_compact).pack(side="left", padx=(12, 0))
+        window.after(200, self._auto_compact)
         root.protocol("WM_DELETE_WINDOW", self._close)
         root.after(15, self._poll)
+
+    # ---------------------------------------------------------- compact mode
+    def _apply_compact(self):
+        """Hide the bulky read-only extras so the essentials fit a laptop screen:
+        the IF/THEN link plot, the time-code analysis text and the miner's block text."""
+        on = self.v_compact.get()
+        if on == self._compact:
+            return
+        self._compact = on
+        if on:
+            self.analysis_box.pack_forget()
+            self.plot1.pack_forget()
+            self.plot1_label.pack_forget()
+            self.block_text.pack_forget()
+            self.log.config(height=7)
+            self.cam.config(width=PW, height=PH)
+        else:
+            self.plot1_label.pack(anchor="w", before=self.plot2_label_anchor)
+            self.plot1.pack(before=self.plot2_label_anchor)
+            self.analysis_box.pack(anchor="w", pady=(6, 0))
+            self.block_text.pack(fill="both", expand=True, before=self.hidden_box)
+            self.log.config(height=14)
+        self.root.update_idletasks()
+        self.scroller._toggle_bars()
+
+    def _auto_compact(self):
+        """Switch to compact mode on its own when the window is clearly too small."""
+        try:
+            need_h = self.root.winfo_reqheight()
+            have_h = self.window.winfo_screenheight() - 110
+            if need_h > have_h and not self.v_compact.get():
+                self.v_compact.set(True)
+                self._apply_compact()
+                self.window.update_idletasks()
+                fit_window(self.window, self.root.winfo_reqwidth() + 24, self.root.winfo_reqheight() + 8)
+        except Exception:
+            pass
 
     # ---------------------------------------------------------- controls
     def _controls(self):
         outer = ttk.Frame(self.root)
-        outer.grid(row=0, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+        outer.grid(row=0, column=0, columnspan=3, sticky="ew", padx=6, pady=6)
         f = ttk.Frame(outer)
         f.pack(anchor="w")
         f2 = ttk.Frame(outer)
         f2.pack(anchor="w", pady=(5, 0))
+        self.ctl_row2 = f2
         ttk.Label(f, text="Camera:").pack(side="left")
         self.s_cam = ttk.Spinbox(f, from_=0, to=9, width=3)
         self.s_cam.set(0)
@@ -902,9 +1156,9 @@ class App:
 
     def _miner_panel(self):
         panel = ttk.LabelFrame(self.root, text="Asynchronous SHA-256 miner")
-        panel.grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        panel.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
-        left = ttk.Frame(panel, width=420, height=290)
+        left = ttk.Frame(panel, width=380, height=270)
         left.pack_propagate(False)
         left.pack(side="left", anchor="n", padx=8, pady=8)
 
@@ -960,11 +1214,69 @@ class App:
 
         right = ttk.Frame(panel)
         right.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
+        logf = ttk.Frame(panel)
+        logf.pack(side="left", fill="y", padx=(0, 8), pady=8)
+        ttk.Label(logf, text="Log", font=("Arial", 9, "bold")).pack(anchor="w")
+        self.log = tk.Text(logf, height=14, width=58, font=("Consolas", 8), state="disabled",
+                           wrap="none")
+        self.log.pack(fill="y", expand=True)
         ttk.Label(right, text="Latest SHA-256 block",
                   font=("Arial", 9, "bold")).pack(anchor="w")
-        self.block_text = tk.Text(right, height=10, width=70, font=("Consolas", 9),
+        self.block_text = tk.Text(right, height=6, width=64, font=("Consolas", 8),
                                   state="disabled", wrap="none")
         self.block_text.pack(fill="both", expand=True)
+        self._hidden_panel(right)
+
+    def _hidden_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Hidden number (spot check on even states)")
+        box.pack(fill="x", pady=(8, 0))
+        self.hidden_box = box
+        row = ttk.Frame(box)
+        row.pack(anchor="w", padx=6, pady=(4, 0))
+        self.v_hidden_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="Enabled", variable=self.v_hidden_on,
+                        command=lambda: self.ctl.update(hidden_on=self.v_hidden_on.get())
+                        ).pack(side="left")
+        ttk.Label(row, text="Range 0 to").pack(side="left", padx=(12, 2))
+        self.v_hrange = tk.StringVar(value=str(HIDDEN_RANGE_DEFAULT))
+        self.s_hrange = ttk.Spinbox(row, from_=2, to=HIDDEN_RANGE_MAX, increment=100, width=9,
+                                    textvariable=self.v_hrange, command=self._hidden_range_changed)
+        self.s_hrange.pack(side="left")
+        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
+            self.s_hrange.bind(ev, lambda e: self.root.after_idle(self._hidden_range_changed), add="+")
+        ttk.Button(row, text="New secret",
+                   command=lambda: (self.hidden.new_secret(), self._log("# hidden number: new secret drawn"))
+                   ).pack(side="left", padx=(12, 2))
+        ttk.Button(row, text="Reveal", command=self._hidden_reveal).pack(side="left", padx=2)
+        hbox, self.l_hidden = fixed_label(box, 480, 62, text="", font=("Consolas", 9),
+                                          justify="left", wraplength=480)
+        hbox.pack(anchor="w", padx=6, pady=(2, 4))
+        set_text(self.l_hidden, "clock idle")
+
+    def _hidden_range_changed(self, _e=None):
+        try:
+            n = int(self.v_hrange.get().strip())
+        except (ValueError, tk.TclError):
+            return
+        n = max(2, min(HIDDEN_RANGE_MAX, n))
+        if n != self.hidden.size:
+            self.hidden.set_range(n)
+            self._log(f"# hidden number: range 0..{n - 1}, new secret drawn")
+
+    def _hidden_reveal(self):
+        v = self.hidden.reveal()
+        self._log(f"# hidden number revealed: {v}")
+
+    def _show_hidden(self, h):
+        if not h:
+            return
+        lc = h["last_check"]
+        last = "none yet" if lc is None else f"candidate {lc[0]} -> {'HIT' if lc[1] else 'miss'}"
+        sec = "hidden" if h["secret"] is None else str(h["secret"])
+        set_text(self.l_hidden, (
+            f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (varying)\n"
+            f"spot checks: {h['checks']}   hits: {h['hits']}   expected ~{h['expected']:.2f}\n"
+            f"last check: {last}   secret: {sec}"))
 
     def _mining_changed(self, _e=None):
         """Push the difficulty / macroblock fields into the live control dict.
@@ -995,6 +1307,7 @@ class App:
         return f"{v:.1f} H/s"
 
     def _show_miner(self, m):
+        self._show_hidden(m.get("hidden"))
         set_text(self.l_miner, (
             f"Mining: {'ON' if m['mining'] else 'OFF'}\n"
             f"Hash rate: {self._rate(m['hash_rate'])}\n"
@@ -1006,7 +1319,8 @@ class App:
             f"Macroblocks mined: {m['macroblocks']}   skipped: {m['skipped']}\n"
             f"Blocks found: {m['blocks']}\n"
             f"Even states seen: {m['mined_even']}\n"
-            f"Time codes added: {m['timecodes_added']} (pending {m['timecode_pending']})\n"
+            f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
+            f"pending {m['timecode_pending']})\n"
             f"Skipped/sec: {m['skipped_per_second']:.2f}\n"
             f"Miner queue: {m['miner_queue']}\n"
             f"Target now: {m['difficulty']} zero hex nibbles / "
@@ -1181,13 +1495,17 @@ class App:
     def _right_panel(self):
         f = ttk.Frame(self.root)
         f.grid(row=1, column=1, sticky="n", padx=6, pady=4)
-        ttk.Label(f, text="IF/THEN link during the latest frame",
-                  font=("Arial", 9, "bold")).pack(anchor="w")
+        self.right_col = f
+        self.plot1_label = ttk.Label(f, text="IF/THEN link during the latest frame",
+                                     font=("Arial", 9, "bold"))
+        self.plot1_label.pack(anchor="w")
         self.plot1 = tk.Canvas(f, width=420, height=170, bg="white",
                                highlightthickness=1, highlightbackground="#bbb")
         self.plot1.pack()
-        ttk.Label(f, text="Moving pixels per frame (x)",
-                  font=("Arial", 9, "bold")).pack(anchor="w", pady=(6, 0))
+        self.plot2_label = ttk.Label(f, text="Moving pixels per frame (x)",
+                                     font=("Arial", 9, "bold"))
+        self.plot2_label.pack(anchor="w", pady=(6, 0))
+        self.plot2_label_anchor = self.plot2_label
         self.plot2 = tk.Canvas(f, width=420, height=90, bg="white",
                                highlightthickness=1, highlightbackground="#bbb")
         self.plot2.pack()
@@ -1294,6 +1612,7 @@ class App:
 
     def _close(self):
         self.ctl["stop"] = True
+        self.hidden.stop()
         self.root.after(150, self.root.destroy)
 
     # ---------------------------------------------------------- events
@@ -1314,6 +1633,11 @@ class App:
                     last = d                           # older frames are skipped, not drawn
                 elif kind == "miner":
                     self._pending_miner = ev[1]        # keep only the newest
+                elif kind == "hidden_hit":
+                    hh = ev[1]
+                    self._log(f"HIDDEN NUMBER GUESSED frame {hh['frame']:5d} x={hh['x']} "
+                              f"candidate={hh['snap']['last_check'][0]} "
+                              f"after {hh['snap']['checks']} checks; time code added")
                 elif kind == "block":
                     self._show_block(ev[1])
                     self._log(
@@ -1393,7 +1717,8 @@ class App:
         self._lit("node", d["node"] > 0.5, f"{d['node']:.2f}")
         self._lit("Y", d["y_bin"],
                   f"[{self.ctl['y']}]  bin {d['idx'] % len(self.ctl['y'])}={d['y_bin']}"
-                  + (" +BLOCK" if d.get("block_found") else ""))
+                  + (" +BLOCK" if d.get("block_found") else "")
+                  + (" +HIDDEN" if d.get("hidden_hit") else ""))
         self._lit("ff", d["Q"], f"Q = {d['Q']}", GOOD)
         self._lit("clk", False, f"frame {d['idx']}  {round(d['dt'] * 1000, -1):.0f} ms")
         lamp = "#3cb043" if d["select"] else "#ddd"
@@ -1460,8 +1785,20 @@ class App:
         self.log.config(state="disabled")
 
 
+def fit_window(win, content_w=1180, content_h=1180):
+    """Open at the content size, but never larger than the usable screen."""
+    win.update_idletasks()
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(content_w, sw - 40)
+    h = min(content_h, sh - 110)              # room for title bar + taskbar
+    x = max(0, (sw - w) // 2)
+    win.geometry(f"{w}x{h}+{x}+0")
+    win.minsize(640, 420)
+
+
 if __name__ == "__main__":
     root = tk.Tk()
-    root.geometry("1180x1040")
-    App(root)
+    app = App(root)
+    root.update_idletasks()
+    fit_window(root, app.root.winfo_reqwidth() + 24, app.root.winfo_reqheight() + 8)
     root.mainloop()
