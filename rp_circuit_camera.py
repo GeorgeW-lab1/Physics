@@ -145,10 +145,10 @@ def mine_macroblock(header: bytes, start_nonce: int, size: int, difficulty: int)
 
 
 # ------------------------------------------------------------------ hidden-number guesser
-HIDDEN_RANGE_DEFAULT = 1000
+HIDDEN_RANGE_DEFAULT = 100
 HIDDEN_RANGE_MAX = 1_000_000
 GUESS_HZ_MIN, GUESS_HZ_MAX = 20.0, 2000.0     # the clock wanders between these
-GUESS_RETUNE_S = 0.3                          # how often a new frequency is drawn
+GUESS_RETUNE_S = 0.3                          # how often a new frequency is drawn # changed to static frequency
 
 
 class HiddenNumber:
