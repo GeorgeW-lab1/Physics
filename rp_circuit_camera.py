@@ -195,6 +195,7 @@ class HashSearch:
         self.rounds = 0                     # finished rounds (hit or miss)
         self.hash_time = 0.0                # seconds spent in step()
         self.last = None                    # text of the latest query / check
+        self.need = 0                       # difficulty used by the latest query
         self.set_bits(bits)
 
     def _new_round_locked(self):
@@ -230,7 +231,9 @@ class HashSearch:
         dict (nonce, nonce_hex, digest, target, header, matched, hashes, elapsed,
         hash_rate, bits) when that check passes, else None."""
         t0 = time.perf_counter()
+        need = max(0, min(64, int(difficulty)))              # live value, read every query
         with self._lock:
+            self.need = need
             n_hash = 0
             if self.header is None:                          # open a round
                 self.header = header
@@ -246,14 +249,13 @@ class HashSearch:
 
             hit = None
             if self.pooled_n < self.bits:
-                self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}"
+                self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}  (need {need} nibbles)"
             else:
                 # pool is full: the ONE final check, on the OUTPUT of the pooled input
                 digest = digest_of(self.header, self.pooled, self.nbytes)
                 n_hash += 1
                 self.final_checks += 1
                 self.rounds += 1
-                need = max(0, min(64, int(difficulty)))
                 matched = matched_nibbles(digest, self.target)
                 ok = matched >= need
                 if ok:
@@ -288,6 +290,7 @@ class HashSearch:
     def snapshot(self) -> dict:
         with self._lock:
             return dict(bits=self.bits, queries=self.queries, hashes=self.hashes,
+                        need=self.need,
                         pooled_n=self.pooled_n, final_checks=self.final_checks,
                         blocks=self.blocks, rounds=self.rounds, hash_time=self.hash_time,
                         last=self.last, pooled_hex=format(self.pooled, "x"),
@@ -1674,7 +1677,7 @@ class App:
         self._show_hidden(m.get("hidden"))
         self._show_search(m.get("search"))
         hs = m.get("hashsearch") or dict(pooled_n=0, bits=self.ctl["hash_bits"],
-                                         final_checks=0, last=None)
+                                         final_checks=0, last=None, need=0)
         last = "none yet" if hs["last"] is None else hs["last"]
         set_text(self.l_miner, (
             f"Mining: {'ON' if m['mining'] else 'OFF'}\n"
@@ -1689,7 +1692,8 @@ class App:
             f"Even pairs (2 in a row): {m['mined_even']}\n"
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
             f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
-            f"Target now: {m['difficulty']} output nibbles must match, final check only"))
+            f"Difficulty set: {m['difficulty']} nibbles   used by last query: {hs['need']}   "
+            f"(applied at the final check)"))
 
     def _show_block(self, b):
         self.block_count += 1
