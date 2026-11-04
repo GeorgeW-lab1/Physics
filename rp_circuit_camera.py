@@ -133,7 +133,7 @@ def is_odd_composite(x: int) -> bool:
 DIFFICULTY_DEFAULT = 4            # leading zero hex nibbles required
 HASH_BITS_DEFAULT = 64            # width of the nonce (the SHA-256 input) in bits
 HASH_BITS_MAX = 4096              # any width: the nonce is packed into ceil(bits/8) bytes
-DIFFICULTY_MAX = 16
+DIFFICULTY_MAX = 64               # a SHA-256 digest has 64 hex nibbles
 
 
 def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
@@ -147,14 +147,14 @@ def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
     return (digest[whole] >> 4) == 0 if rem else True
 
 
-def leading_zero_nibbles(digest: bytes) -> int:
-    """How many hex nibbles at the start of the digest are zero."""
+def matched_nibbles(a: bytes, b: bytes) -> int:
+    """How many leading hex nibbles two digests share."""
     n = 0
-    for byte in digest:
-        if byte == 0:
+    for x, y in zip(a, b):
+        if x == y:
             n += 2
             continue
-        return n + (1 if byte >> 4 == 0 else 0)
+        return n + (1 if x >> 4 == y >> 4 else 0)
     return n
 
 
@@ -166,37 +166,43 @@ def digest_of(header: bytes, nonce: int, nbytes: int = 8) -> bytes:
 
 
 class HashSearch:
-    """SHA-256 input/output search with POOLED bits (same template as BinarySearch).
+    """SHA-256 input/output instance solved exactly like the secret-bits search.
 
-    The input is a `bits`-bit nonce. Each step() is one query that yields exactly
-    one bit of it, most significant bit first: the two children of the current
-    pool (next bit 0 / next bit 1, remaining bits 0) are hashed and the bit is 1
-    when the digest with the bit set is the smaller one. The bit goes into the
-    pool and NO difficulty check is made on that query. Only when all `bits` bits
-    are pooled is the pooled nonce hashed once and tested against the difficulty,
-    one final check. A hit earns one time-code bin; hit or miss, the next round
-    starts with a fresh header and an empty pool.
+    Per round (one header from the frame that opens it):
+      * a hidden `bits`-bit INPUT nonce is drawn, and its SHA-256 digest is the
+        public OUTPUT target, sha256(header + secret);
+      * every step() is one higher/lower oracle query on the input, "is secret >=
+        pooled-so-far with this bit set?", yielding one bit, most significant
+        first. The bit goes into the pool and NO check is made on that query;
+      * when all `bits` bits are pooled, the pooled nonce is hashed once and its
+        digest is compared with the target: the ONE final check. `difficulty` is
+        how many leading hex nibbles of the output must match the target (64 =
+        the whole digest).
+    A hit earns one time-code bin; hit or miss, the next round starts with a new
+    header, a new hidden nonce and an empty pool. Any width up to HASH_BITS_MAX
+    costs `bits` pooled queries plus one final check.
 
-    SHA-256 has no real higher/lower signal, so unlike BinarySearch the pooled
-    nonce is not guaranteed to be a hit: the final check is what decides."""
+    This is a simulation in the same sense as BinarySearch: the oracle knows the
+    hidden input, which is what makes it fast. It does not invert SHA-256."""
 
     def __init__(self, bits=HASH_BITS_DEFAULT):
         self._lock = threading.Lock()
         self.bits = 2
         self.queries = 0                    # pooled queries since the last reset
         self.hashes = 0                     # SHA-256 evaluations since the last reset
-        self.final_checks = 0               # difficulty checks made (one per full pool)
+        self.final_checks = 0               # output checks made (one per full pool)
         self.blocks = 0                     # final checks that passed
         self.rounds = 0                     # finished rounds (hit or miss)
-        self.hash_time = 0.0                # seconds spent hashing
+        self.hash_time = 0.0                # seconds spent in step()
         self.last = None                    # text of the latest query / check
         self.set_bits(bits)
 
     def _new_round_locked(self):
         self.header = None
+        self._secret = None                 # hidden input nonce of this round
+        self.target = None                  # public output: sha256(header + secret)
         self.pooled = 0                     # nonce bits collected, MSB first
         self.pooled_n = 0
-        self._cur = None                    # digest of the pooled nonce so far
         self.round_hashes = 0
         self.round_time = 0.0
 
@@ -219,25 +225,22 @@ class HashSearch:
             self._reset_counts_locked()
 
     def step(self, header: bytes, difficulty: int):
-        """One query. `header` is used only to open a round. Pools one bit; only the
-        query that fills the pool runs the single final check. Returns a dict
-        (nonce, digest, hashes, elapsed, hash_rate, bits) when that check passes,
-        else None."""
+        """One oracle query. `header` is used only to open a round. Pools one bit;
+        only the query that fills the pool runs the single final check. Returns a
+        dict (nonce, nonce_hex, digest, target, header, matched, hashes, elapsed,
+        hash_rate, bits) when that check passes, else None."""
         t0 = time.perf_counter()
         with self._lock:
             n_hash = 0
             if self.header is None:                          # open a round
                 self.header = header
-                self._cur = digest_of(header, 0, self.nbytes)
+                self._secret = secrets.randbelow(1 << self.bits)
+                self.target = digest_of(header, self._secret, self.nbytes)
                 n_hash += 1
             shift = self.bits - 1 - self.pooled_n
             trial = self.pooled | (1 << shift)
-            d1 = digest_of(self.header, trial, self.nbytes)               # child with this bit = 1
-            n_hash += 1
-            bit = 1 if d1 < self._cur else 0                 # smaller digest wins the bit
-            if bit:
-                self.pooled = trial
-                self._cur = d1
+            bit = 1 if self._secret >= trial else 0          # oracle: higher/lower, no check
+            self.pooled |= bit << shift
             self.pooled_n += 1
             self.queries += 1
 
@@ -245,27 +248,32 @@ class HashSearch:
             if self.pooled_n < self.bits:
                 self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}"
             else:
-                # pool is full: the ONE final check, on a fresh hash of the pooled input
+                # pool is full: the ONE final check, on the OUTPUT of the pooled input
                 digest = digest_of(self.header, self.pooled, self.nbytes)
                 n_hash += 1
                 self.final_checks += 1
                 self.rounds += 1
-                # the ONE real final check: the digest of the pooled nonce must start
-                # with `difficulty` zero hex nibbles. A block is never reported otherwise.
-                zeros = leading_zero_nibbles(digest)
-                ok = hash_meets_difficulty(digest, difficulty)
+                need = max(0, min(64, int(difficulty)))
+                matched = matched_nibbles(digest, self.target)
+                ok = matched >= need
                 if ok:
                     self.blocks += 1
-                    self.last = f"final check PASSED ({zeros} zero nibbles >= {difficulty})"
+                    self.last = f"final check PASSED ({matched} nibbles match target, need {need})"
                 else:
-                    self.last = (f"final check failed ({zeros} zero nibbles < {difficulty}), "
+                    self.last = (f"final check failed ({matched} nibbles match, need {need}), "
                                  f"pool cleared")
                 elapsed = (time.perf_counter() - t0) + self.round_time
                 hashes = self.round_hashes + n_hash
                 if ok:
-                    hit = dict(nonce=self.pooled, digest=digest.hex(),
-                               header=self.header.hex() if self.header else "",
-                               hashes=hashes, elapsed=elapsed, bits=self.bits, zeros=zeros,
+                    nonce_hex = format(self.pooled, "x").zfill(self.nbytes * 2)
+                    # independent recomputation from the exact fields that get displayed
+                    check = hashlib.sha256(bytes.fromhex(self.header.hex())
+                                           + bytes.fromhex(nonce_hex)).digest()
+                    assert check == digest and matched_nibbles(check, self.target) >= need
+                    hit = dict(nonce=self.pooled, nonce_hex=nonce_hex, digest=digest.hex(),
+                               target=self.target.hex(), matched=matched,
+                               header=self.header.hex(), hashes=hashes, elapsed=elapsed,
+                               bits=self.bits,
                                hash_rate=hashes / elapsed if elapsed else 0.0)
                 self._new_round_locked()
             dt = time.perf_counter() - t0
@@ -1651,7 +1659,7 @@ class App:
         if hasattr(self, "l_target"):
             d, n = self.ctl["difficulty"], self.ctl["hash_bits"]
             set_text(self.l_target,
-                     f"live: {d} zero nibbles, {n}-bit nonce pooled, "
+                     f"live: {n}-bit hidden input, {d} output nibbles must match, "
                      f"1 final check per round")
 
     @staticmethod
@@ -1681,7 +1689,7 @@ class App:
             f"Even pairs (2 in a row): {m['mined_even']}\n"
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
             f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
-            f"Target now: {m['difficulty']} zero hex nibbles, final check only"))
+            f"Target now: {m['difficulty']} output nibbles must match, final check only"))
 
     def _show_block(self, b):
         self.block_count += 1
@@ -1692,15 +1700,17 @@ class App:
             f"frame:      {b['frame']}\n"
             f"x:          {b['x']}\n"
             f"time:       {b['time']:.6f}\n"
-            f"nonce:      {short_int(b['nonce'], 32)}\n"
+            f"nonce (hex, {len(b['nonce_hex']) // 2} bytes): {b['nonce_hex']}\n"
             f"header (hex): {b.get('header', 'n/a')}\n"
-            f"difficulty: {b['difficulty']} zero hex nibbles\n"
+            f"difficulty: {b['difficulty']} nibbles of the output must match the target\n"
             f"nonce bits: {b['bits']} pooled, one final check\n"
             f"digest (full): {b['digest']}\n"
-            f"verified:   {b.get('zeros', '?')} leading zero nibbles >= difficulty {b['difficulty']}\n"
+            f"target:     {b['target']}\n"
+            f"verified:   {b.get('matched', '?')} leading nibbles match the target (need {b['difficulty']})\n"
             f"hashes:     {b['hashes']}\n"
             f"mine time:  {b['elapsed'] * 1000:.2f} ms\n"
             f"hash rate:  {self._rate(b['hash_rate'])}\n"
+            f"recheck:    sha256(bytes.fromhex(header) + bytes.fromhex(nonce)) == digest\n"
             f"time code:  one bin added when the final check passed")
         self.block_text.config(state="disabled")
 
