@@ -155,7 +155,45 @@ def mine_macroblock(header: bytes, start_nonce: int, size: int, difficulty: int)
         digest = hashlib.sha256(header + nonce.to_bytes(8, "big")).digest()
         if hash_meets_difficulty(digest, difficulty):
             return True, nonce, digest.hex(), offset + 1, time.perf_counter() - t0
+
     return False, None, "", size, time.perf_counter() - t0
+
+
+def mine_macroblock_tree(header: bytes, start_nonce: int, size: int, difficulty: int,
+                         progress=None):
+    """Search nonces [start_nonce, start_nonce + size) using a binary-tree traversal.
+
+    Returns (found, nonce, digest_hex, hashes_done, elapsed_seconds).
+
+    `progress(nonce, hashes_done)` is called every 128 hashes so the GUI can show
+    the live nonce and hash count.
+    """
+    t0 = time.perf_counter()
+    hashes_done = 0
+    stack = [(start_nonce, start_nonce + size - 1)]
+
+    while stack:
+        lo, hi = stack.pop()
+        if lo > hi:
+            continue
+
+        mid = (lo + hi) // 2
+        digest = hashlib.sha256(header + mid.to_bytes(8, "big")).digest()
+        hashes_done += 1
+
+        if progress is not None and hashes_done % 128 == 0:
+            progress(mid, hashes_done)
+
+        if hash_meets_difficulty(digest, difficulty):
+            return True, mid, digest.hex(), hashes_done, time.perf_counter() - t0
+
+        # SHA-256 gives no direction, so both halves remain possible.
+        if mid + 1 <= hi:
+            stack.append((mid + 1, hi))
+        if lo <= mid - 1:
+            stack.append((lo, mid - 1))
+
+    return False, None, "", hashes_done, time.perf_counter() - t0
 
 
 # ------------------------------------------------------------------ hidden-number guesser
@@ -802,6 +840,7 @@ class SimThread(threading.Thread):
                  last_frame_hashes=0, last_frame_time=0.0,
                  miner_start_time=None, skipped_per_second=0.0,
                  miner_queue=0, next_nonce=0,
+                 live_nonce=None, live_hashes=0,
                  last_difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
                  last_macroblock=int(ctl.get("macroblock", MACROBLOCK_DEFAULT)),
                  pending_block=None, timecodes_added=0, hidden_timecodes=0,
@@ -836,7 +875,9 @@ class SimThread(threading.Thread):
                 search=S.get("search"),
                 hidden=S.get("hidden"),
                 timecode_pending=int(ctl.get("timecode_pending", 0)),
-                miner_queue=miner_q.qsize())
+                miner_queue=miner_q.qsize(),
+                live_nonce=S.get("live_nonce"),
+                live_hashes=S.get("live_hashes", 0))
 
         async def miner_worker():
             while True:
@@ -845,9 +886,17 @@ class SimThread(threading.Thread):
                     miner_q.task_done()
                     return
                 idx, x, header, start_nonce, size, difficulty = job
+                S["live_nonce"] = start_nonce
+                S["live_hashes"] = 0
                 try:
+                    def report_tree_progress(nonce_now, hashes_now):
+                        S["live_nonce"] = nonce_now
+                        S["live_hashes"] = hashes_now
+                        out.put(("miner", miner_snapshot()))
+
                     found, nonce, bdigest, hashes, elapsed = await asyncio.to_thread(
-                        mine_macroblock, header, start_nonce, size, difficulty)
+                        mine_macroblock_tree, header, start_nonce, size, difficulty,
+                        report_tree_progress)
                 except Exception as e:                     # never let the worker die
                     out.put(("info", f"miner error: {e}"))
                     miner_q.task_done()
@@ -946,7 +995,7 @@ class SimThread(threading.Thread):
                 # A hash or a hidden-number guess is only allowed after TWO SEQUENTIAL even
                 # states: this frame and the one right before it must both be even. A frame
                 # with no motion (x = 0) or an odd x breaks the run.
-                even_now = x > 0 and x % 2 == 0
+                even_now = x > 0 and x % 3 == 0
                 even_state = even_now and prev_even        # armed: two evens in a row
                 prev_even = even_now
 
@@ -1586,6 +1635,8 @@ class App:
             f"Hash rate: {self._rate(m['hash_rate'])}\n"
             f"Average: {self._rate(m['average_hash_rate'])}\n"
             f"Best: {self._rate(m['best_hash_rate'])}\n"
+            f"Live nonce: {m.get('live_nonce') if m.get('live_nonce') is not None else '-'}   "
+            f"hashes this macroblock: {m.get('live_hashes', 0)}\n"
             f"Last macroblock: {m['last_frame_hashes']} hashes in "
             f"{m['last_frame_time'] * 1000:.2f} ms\n"
             f"Total: {m['hashes']} hashes in {m['total_mine_time']:.3f} s\n"
