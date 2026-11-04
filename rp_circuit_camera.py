@@ -240,7 +240,7 @@ class HiddenNumber:
             now = time.perf_counter()
             if now >= next_retune:
                 # log-uniform frequency, so slow and fast regimes are equally likely
-                hz = 17
+                hz = 32
                 period = 1.0 / hz
                 next_retune = now + GUESS_RETUNE_S
                 with self._lock:
