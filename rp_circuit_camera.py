@@ -855,7 +855,7 @@ class SimThread(threading.Thread):
                 # A hidden-number spot check or a search guess is only allowed after TWO SEQUENTIAL even
                 # states: this frame and the one right before it must both be even. A frame
                 # with no motion (x = 0) or an odd x breaks the run.
-                even_now = x > 0 and x % 3 == 0
+                even_now = x > 0 and x % 2 == 0
                 even_state = even_now and prev_even        # armed: two evens in a row
                 prev_even = even_now
                 S["last_x"], S["last_even"], S["last_armed"] = x, even_now, even_state
@@ -1389,7 +1389,6 @@ class App:
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
             f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
             f"Armed frames (2 evens in a row): {m['armed_frames']}\n"
-            f"Now: x={m['last_x']} ({'multiple of 3' if m['last_even'] else 'not a multiple of 3'}), "
             f"{'ARMED' if m['last_armed'] else 'not armed'}"
             f"{'' if m['circuit'] else '  [circuit OFF: press Start circuit]'}"))
 
