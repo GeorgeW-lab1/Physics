@@ -694,7 +694,7 @@ class SimThread(threading.Thread):
                 hashes=S["hashes"], macroblocks=S["macroblocks"],
                 skipped=S["skipped_macroblocks_total"], blocks=S["blocks"],
                 dropped=S["skipped_macroblocks"],
-                mining=bool(ctl.get("mining", True)),
+                mining=bool(ctl.get("mining", False)),
                 difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
                 macroblock_size=int(ctl.get("macroblock", MACROBLOCK_DEFAULT)),
                 last_difficulty=S["last_difficulty"],
@@ -834,7 +834,7 @@ class SimThread(threading.Thread):
                                                     snap=hidden.snapshot())))
                 if hidden is not None:
                     S["hidden"] = hidden.snapshot()
-                if ctl.get("mining", True):
+                if ctl.get("mining", False):
                     if even_state:
                         S["mined_even"] += 1
                         if miner_q.full():
@@ -1032,7 +1032,7 @@ class App:
         self.thread = None
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
-                        mining=True, difficulty=DIFFICULTY_DEFAULT,
+                        mining=False, difficulty=DIFFICULTY_DEFAULT,
                         macroblock=MACROBLOCK_DEFAULT, timecode_pending=0,
                         hidden_on=True)
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
