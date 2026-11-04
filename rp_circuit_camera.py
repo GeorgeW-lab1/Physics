@@ -56,6 +56,9 @@ that wanders randomly (20 Hz to 2 kHz, re-drawn every 0.3 s). The thread never s
 secret. Only when an EVEN state arrives does the frame loop spot-check the candidate AT
 THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a mined
 macroblock) and a new secret is hidden. Expected hits = checks / range.
+"New secret" (and changing the range) draws a fresh secret and zeroes the spot checks,
+hits and luck factor. The luck factor is hits / expected hits in percent (100% = average),
+shown with P(>= hits by chance), the binomial tail probability.
 
 Needs a real USB camera and OpenCV: motion comes only from what the camera
 sees. There is no simulated source; if the camera can't be opened, it says so.
@@ -151,6 +154,19 @@ GUESS_HZ_MIN, GUESS_HZ_MAX = 20.0, 2000.0     # the clock wanders between these
 GUESS_RETUNE_S = 0.3                          # how often a new frequency is drawn # changed to static frequency
 
 
+def prob_at_least(hits: int, n: int, p: float) -> float:
+    """P(X >= hits) for X ~ Binomial(n, p): the chance of being at least this lucky."""
+    if hits <= 0:
+        return 1.0
+    if hits > n:
+        return 0.0
+    s = 0.0
+    for i in range(hits):
+        s += math.exp(math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1)
+                      + i * math.log(p) + (n - i) * math.log(1 - p))
+    return min(1.0, max(0.0, 1.0 - s))
+
+
 class HiddenNumber:
     """A secret integer in [0, size) and a separate thread that clock-cycles a candidate
     through the same range at a randomly varying frequency.
@@ -185,19 +201,29 @@ class HiddenNumber:
     def stop(self):
         self._stop.set()
 
+    def _reset_counts_locked(self):
+        """Zero the statistics (caller holds the lock)."""
+        self.checks = 0
+        self.hits = 0
+        self.rounds = 0
+        self.last_check = None
+
     def set_range(self, size: int):
-        """Change the range and draw a fresh secret."""
+        """Change the range, draw a fresh secret and restart the counts."""
         size = max(2, min(HIDDEN_RANGE_MAX, int(size)))
         with self._lock:
             self.size = size
             self.candidate %= size
             self._secret = int(self._rng.integers(0, size))
             self.revealed = False
+            self._reset_counts_locked()
 
     def new_secret(self):
+        """Draw a fresh secret and restart the counts (and the luck factor)."""
         with self._lock:
             self._secret = int(self._rng.integers(0, self.size))
             self.revealed = False
+            self._reset_counts_locked()
 
     def reveal(self):
         """Show the secret to the user (never used by the clock thread)."""
@@ -245,10 +271,14 @@ class HiddenNumber:
 
     def snapshot(self) -> dict:
         with self._lock:
+            p = 1.0 / self.size
+            expected = self.checks * p
+            luck = (self.hits / expected * 100.0) if expected > 0 else None
+            tail = prob_at_least(self.hits, self.checks, p) if self.checks else None
             return dict(size=self.size, candidate=self.candidate, hz=self.hz,
                         ticks=self.ticks, checks=self.checks, hits=self.hits,
                         rounds=self.rounds, last_check=self.last_check,
-                        expected=(self.checks / self.size),
+                        expected=expected, luck=luck, luck_tail=tail,
                         secret=self._secret if self.revealed else None)
 
 
@@ -1245,10 +1275,9 @@ class App:
         for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
             self.s_hrange.bind(ev, lambda e: self.root.after_idle(self._hidden_range_changed), add="+")
         ttk.Button(row, text="New secret",
-                   command=lambda: (self.hidden.new_secret(), self._log("# hidden number: new secret drawn"))
-                   ).pack(side="left", padx=(12, 2))
+                   command=self._hidden_new_secret).pack(side="left", padx=(12, 2))
         ttk.Button(row, text="Reveal", command=self._hidden_reveal).pack(side="left", padx=2)
-        hbox, self.l_hidden = fixed_label(box, 480, 62, text="", font=("Consolas", 9),
+        hbox, self.l_hidden = fixed_label(box, 480, 78, text="", font=("Consolas", 9),
                                           justify="left", wraplength=480)
         hbox.pack(anchor="w", padx=6, pady=(2, 4))
         set_text(self.l_hidden, "clock idle")
@@ -1261,7 +1290,13 @@ class App:
         n = max(2, min(HIDDEN_RANGE_MAX, n))
         if n != self.hidden.size:
             self.hidden.set_range(n)
-            self._log(f"# hidden number: range 0..{n - 1}, new secret drawn")
+            self._show_hidden(self.hidden.snapshot())
+            self._log(f"# hidden number: range 0..{n - 1}, new secret drawn, counts reset")
+
+    def _hidden_new_secret(self):
+        self.hidden.new_secret()
+        self._show_hidden(self.hidden.snapshot())      # show the zeroed counts at once
+        self._log("# hidden number: new secret drawn, counts and luck reset")
 
     def _hidden_reveal(self):
         v = self.hidden.reveal()
@@ -1273,9 +1308,15 @@ class App:
         lc = h["last_check"]
         last = "none yet" if lc is None else f"candidate {lc[0]} -> {'HIT' if lc[1] else 'miss'}"
         sec = "hidden" if h["secret"] is None else str(h["secret"])
+        if h["luck"] is None:
+            luck = "luck factor: n/a (no spot checks yet)"
+        else:
+            luck = (f"luck factor: {h['luck']:.0f}%  (100% = average)   "
+                    f"P(>= {h['hits']} hits by chance) = {h['luck_tail']:.1%}")
         set_text(self.l_hidden, (
             f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (varying)\n"
             f"spot checks: {h['checks']}   hits: {h['hits']}   expected ~{h['expected']:.2f}\n"
+            f"{luck}\n"
             f"last check: {last}   secret: {sec}"))
 
     def _mining_changed(self, _e=None):
