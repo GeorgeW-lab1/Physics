@@ -71,6 +71,16 @@ secret). After EVERY spot check, hit or miss, a new secret is hidden. Expected h
 hits and luck factor. The luck factor is hits / expected hits in percent (100% = average),
 shown with P(>= hits by chance), the binomial tail probability.
 
+Factoriser (separate source, own panel): N is factored through the same higher/lower bit search.
+The oracle holds the smallest prime factor p of N and answers only "p >= trial?". Each armed frame
+pools one bit; one final check runs when the pool is full: 1 < p < N, N % p == 0 and the full prime
+factorisation multiplies back to N. A time-code bin is earned ONLY after that verified solve.
+Typed N is really factored by a background engine (trial division, Fermat, Pollard rho, p-1, ECM,
+quadratic sieve; pip install gmpy2 for speed); the oracle is not ready until the engine finishes.
+Random semiprimes keep their factors inside the oracle, which shows the mechanism only. A
+higher/lower oracle for a factor cannot exist without already knowing it, so the search does not
+make factoring itself cheaper. Camera motion hashes seed the engine's randomness.
+
 Needs a real USB camera and OpenCV: motion comes only from what the camera
 sees. There is no simulated source; if the camera can't be opened, it says so.
 """
@@ -127,6 +137,541 @@ def is_odd_composite(x: int) -> bool:
     if x < 9 or x % 2 == 0:
         return False
     return any(x % d == 0 for d in range(3, int(x ** 0.5) + 1, 2))
+
+
+# ------------------------------------------------------------------ big-number engine setup
+if hasattr(sys, "set_int_max_str_digits"):
+    sys.set_int_max_str_digits(0)     # allow numbers with more than 4300 digits
+
+
+# ------------------------------------------------------------------ big-number factoriser
+# Ladder: trial division -> perfect power -> Fermat -> Pollard rho (Brent) -> Pollard p-1
+#         -> ECM (Montgomery curves, stage 1 + stage 2) -> quadratic sieve.
+# Optional speed-up:  pip install gmpy2   (used automatically when present)
+try:
+    import gmpy2
+    _mpz = gmpy2.mpz
+    _gcd = gmpy2.gcd
+    _isqrt = gmpy2.isqrt
+    _invert = gmpy2.invert
+    HAVE_GMP = True
+except ImportError:                                   # plain Python ints are fine, just slower
+    gmpy2 = None
+    _mpz = int
+    _gcd = math.gcd
+    _isqrt = math.isqrt
+    _invert = lambda a, n: pow(a, -1, n)
+    HAVE_GMP = False
+
+
+class Cancelled(Exception):
+    pass
+
+
+class EntropyPool:
+    """Randomness for the factoriser. Camera motion frames are hashed into the pool when the
+    circuit runs; the operating-system generator is always mixed in, so it works with no camera."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = secrets.token_bytes(32)
+        self.frames = 0
+
+    def feed(self, data: bytes):
+        with self._lock:
+            self._state = hashlib.sha256(self._state + data).digest()
+            self.frames += 1
+
+    def rand_bits(self, bits: int) -> int:
+        out, ctr = b"", 0
+        with self._lock:
+            seed = self._state
+            self._state = hashlib.sha256(self._state + b"\x01").digest()
+        need = (bits + 7) // 8
+        while len(out) < need:
+            out += hashlib.sha256(seed + secrets.token_bytes(16) + ctr.to_bytes(4, "big")).digest()
+            ctr += 1
+        return int.from_bytes(out[:need], "big") & ((1 << bits) - 1)
+
+    def randrange(self, lo: int, hi: int) -> int:
+        span = hi - lo
+        return lo + self.rand_bits(span.bit_length() + 32) % span
+
+
+def _primes_upto(limit: int):
+    sieve = np.ones(limit + 1, dtype=bool)
+    sieve[:2] = False
+    sieve[4::2] = False
+    for i in range(3, int(limit ** 0.5) + 1, 2):
+        if sieve[i]:
+            sieve[i * i::2 * i] = False
+    return np.nonzero(sieve)[0]
+
+
+_SMALL_PRIMES = _primes_upto(200_000)
+
+
+def is_probable_prime(n: int, rounds: int = 24) -> bool:
+    n = int(n)
+    if n < 2:
+        return False
+    for p in (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
+        if n % p == 0:
+            return n == p
+    if gmpy2 is not None:
+        return bool(gmpy2.is_prime(_mpz(n), rounds))
+    d, s = n - 1, 0
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+    bases = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
+    bases += [2 + secrets.randbelow(n - 3) for _ in range(max(0, rounds - len(bases)))]
+    for a in bases:
+        a %= n
+        if a < 2:
+            continue
+        y = pow(a, d, n)
+        if y in (1, n - 1):
+            continue
+        for _ in range(s - 1):
+            y = y * y % n
+            if y == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def _iroot(n: int, k: int) -> int:
+    """floor(n ** (1/k)) by Newton iteration."""
+    if n < 2:
+        return n
+    x = 1 << ((n.bit_length() + k - 1) // k)
+    while True:
+        y = ((k - 1) * x + n // x ** (k - 1)) // k
+        if y >= x:
+            return x
+        x = y
+
+
+def _perfect_power(n: int):
+    """(base, exp) with base ** exp == n and exp > 1, else None."""
+    for k in range(2, min(n.bit_length(), 128) + 1):
+        r = _iroot(n, k)
+        if r < 2:
+            break
+        if r ** k == n:
+            return r, k
+    return None
+
+
+class Factoriser:
+    def __init__(self, pool: EntropyPool, cancel, log, progress=None):
+        self.pool = pool
+        self.cancel = cancel                  # callable -> bool
+        self.log = log
+        self.progress = progress or (lambda *_: None)
+
+    def check(self):
+        if self.cancel():
+            raise Cancelled()
+
+    # ------------------------------------------------------------ top level
+    def factor(self, n: int):
+        """Return sorted list of prime factors (with repetition)."""
+        n = int(n)
+        if n < 2:
+            return [n] if n else [0]
+        out = []
+        # trial division by small primes
+        for p in _SMALL_PRIMES[:20000]:
+            p = int(p)
+            if p * p > n:
+                break
+            if n % p == 0:
+                while n % p == 0:
+                    out.append(p)
+                    n //= p
+        self.check()
+        if n > 1:
+            self._split(n, out)
+        out.sort()
+        return out
+
+    def _split(self, n: int, out: list):
+        self.check()
+        if n == 1:
+            return
+        if is_probable_prime(n):
+            out.append(n)
+            return
+        pp = _perfect_power(n)
+        if pp:
+            b, k = pp
+            sub = []
+            self._split(b, sub)
+            out.extend(sub * k)
+            return
+        d = self.find_factor(n)
+        self._split(d, out)
+        self._split(n // d, out)
+
+    # ------------------------------------------------------------ method ladder
+    def find_factor(self, n: int) -> int:
+        digits = len(str(n))
+        self.log(f"composite, {digits} digits: searching for a factor")
+        for name, fn in (("Fermat", self.fermat), ("Pollard rho", self.rho),
+                         ("Pollard p-1", self.pm1)):
+            self.check()
+            d = fn(n)
+            if d and 1 < d < n:
+                self.log(f"  {name} found a factor ({len(str(d))} digits)")
+                return int(d)
+        # ECM through the t25 level first, then QS if the number is within its reach
+        schedule = [(2_000, 25), (11_000, 90), (50_000, 220), (250_000, 450), (1_000_000, 900),
+                    (3_000_000, 2300), (11_000_000, 4500)]
+        qs_ok = digits <= 85
+        for li, (b1, curves) in enumerate(schedule):
+            for c in range(curves):
+                self.check()
+                self.progress(f"ECM B1={b1:,}  curve {c + 1}/{curves}",
+                              (c + 1) / curves)
+                d = self.ecm_curve(n, b1)
+                if d and 1 < d < n:
+                    self.log(f"  ECM (B1={b1:,}, curve {c + 1}) found a {len(str(d))}-digit factor")
+                    return int(d)
+            self.log(f"  no factor at ECM level B1={b1:,} ({curves} curves)")
+            if qs_ok and b1 >= 50_000:
+                self.log("  switching to the quadratic sieve")
+                d = self.qs(n)
+                if d and 1 < d < n:
+                    return int(d)
+                qs_ok = False
+        raise RuntimeError("ran out of methods")
+
+    # ------------------------------------------------------------ Fermat
+    def fermat(self, n: int, iters: int = 20000):
+        a = _isqrt(_mpz(n))
+        if a * a < n:
+            a += 1
+        b2 = a * a - n
+        for _ in range(iters):
+            b = _isqrt(b2)
+            if b * b == b2:
+                return int(a - b)
+            a += 1
+            b2 += 2 * a - 1
+        return None
+
+    # ------------------------------------------------------------ Pollard rho, Brent variant
+    def rho(self, n: int, max_iter: int = 400_000):
+        n = _mpz(n)
+        for attempt in range(3):
+            y = _mpz(self.pool.randrange(1, int(n)))
+            c = _mpz(self.pool.randrange(1, int(n)))
+            m = 128
+            g = r = q = _mpz(1)
+            x = ys = y
+            total = 0
+            while g == 1 and total < max_iter:
+                self.check()
+                x = y
+                for _ in range(r):
+                    y = (y * y + c) % n
+                k = 0
+                while k < r and g == 1:
+                    ys = y
+                    for _ in range(min(m, r - k)):
+                        y = (y * y + c) % n
+                        q = q * abs(x - y) % n
+                    g = _gcd(q, n)
+                    k += m
+                total += r
+                r *= 2
+            if g == n:
+                g = 1
+                while g == 1:
+                    ys = (ys * ys + c) % n
+                    g = _gcd(abs(x - ys), n)
+            if 1 < g < n:
+                return int(g)
+        return None
+
+    # ------------------------------------------------------------ Pollard p-1
+    def pm1(self, n: int, b1: int = 200_000):
+        n = _mpz(n)
+        a = _mpz(2)
+        for p in _SMALL_PRIMES:
+            p = int(p)
+            if p > b1:
+                break
+            pe = p
+            while pe * p <= b1:
+                pe *= p
+            a = pow(a, pe, n)
+        g = _gcd(a - 1, n)
+        return int(g) if 1 < g < n else None
+
+    # ------------------------------------------------------------ ECM
+    _stage1_cache = {}
+    _prime_cache = {}
+
+    @classmethod
+    def _stage1_scalar(cls, b1):
+        if b1 not in cls._stage1_cache:
+            k = 1
+            for p in _primes_upto(b1):
+                p = int(p)
+                pe = p
+                while pe * p <= b1:
+                    pe *= p
+                k *= pe
+            cls._stage1_cache[b1] = k
+        return cls._stage1_cache[b1]
+
+    @classmethod
+    def _primes_for(cls, b2):
+        if b2 not in cls._prime_cache:
+            cls._prime_cache.clear()
+            cls._prime_cache[b2] = _primes_upto(b2)
+        return cls._prime_cache[b2]
+
+    def ecm_curve(self, n: int, b1: int):
+        """One Montgomery curve (Suyama parametrisation), stage 1 then stage 2."""
+        n = _mpz(n)
+        sigma = _mpz(self.pool.randrange(6, 1 << 62))
+        u = (sigma * sigma - 5) % n
+        v = 4 * sigma % n
+        x0 = pow(u, 3, n)
+        z0 = pow(v, 3, n)
+        denom = 16 * x0 * v % n
+        g = _gcd(denom, n)
+        if 1 < g < n:
+            return int(g)
+        if g == n:
+            return None
+        a24 = pow(v - u, 3, n) * (3 * u + v) % n * _invert(denom, n) % n
+
+        def dbl(x, z):
+            s = (x + z) ** 2 % n
+            d = (x - z) ** 2 % n
+            t = s - d
+            return s * d % n, t * (d + a24 * t) % n
+
+        def add(xp, zp, xq, zq, xd, zd):
+            uu = (xp - zp) * (xq + zq) % n
+            vv = (xp + zp) * (xq - zq) % n
+            s = uu + vv
+            d = uu - vv
+            return zd * (s * s % n) % n, xd * (d * d % n) % n
+
+        def mul(k, x, z):
+            """[k](x:z) by the Montgomery ladder."""
+            r0 = (x, z)
+            r1 = dbl(x, z)
+            for bit in bin(k)[3:]:
+                if bit == "1":
+                    r0 = add(r0[0], r0[1], r1[0], r1[1], x, z)
+                    r1 = dbl(r1[0], r1[1])
+                else:
+                    r1 = add(r0[0], r0[1], r1[0], r1[1], x, z)
+                    r0 = dbl(r0[0], r0[1])
+            return r0
+
+        # ---- stage 1
+        qx, qz = mul(self._stage1_scalar(b1), x0, z0)
+        g = _gcd(qz, n)
+        if 1 < g < n:
+            return int(g)
+        if g == n:
+            return None
+
+        # ---- stage 2 (baby-step / giant-step over primes in (B1, B2])
+        b2 = min(50 * b1, 20_000_000)
+        D = 2310
+        half = D // 2
+        # baby steps [j]Q for 1 <= j <= D/2, kept when gcd(j, D) == 1
+        baby = {}
+        px, pz = qx, qz                       # [1]Q
+        baby[1] = (px, pz)
+        p2x, p2z = dbl(qx, qz)                # [2]Q
+        prev = (px, pz)
+        cur = (p2x, p2z)
+        if math.gcd(2, D) == 1:
+            baby[2] = cur
+        for j in range(3, half + 1):
+            nxt = add(cur[0], cur[1], qx, qz, prev[0], prev[1])
+            prev, cur = cur, nxt
+            if math.gcd(j, D) == 1:
+                baby[j] = cur
+        # giant steps [mD]Q, each new one = previous + [D]Q with the one before as difference
+        dx, dz = mul(D, qx, qz)
+        m = max(2, b1 // D)
+        r_prev = mul((m - 1) * D, qx, qz)
+        rx, rz = mul(m * D, qx, qz)
+        primes = self._primes_for(b2)
+        pi = int(np.searchsorted(primes, b1, side="right"))
+        np_ = len(primes)
+        acc = _mpz(1)
+        while pi < np_:
+            self.check()
+            c = m * D
+            while pi < np_ and primes[pi] <= c + half:
+                p = int(primes[pi])
+                j = abs(p - c)
+                if p > 11 and j in baby:
+                    bx, bz = baby[j]
+                    acc = acc * ((rx * bz - bx * rz) % n) % n
+                pi += 1
+            nx, nz = add(rx, rz, dx, dz, r_prev[0], r_prev[1])
+            r_prev, (rx, rz) = (rx, rz), (nx, nz)
+            m += 1
+        g = _gcd(acc, n)
+        if 1 < g < n:
+            return int(g)
+        return None
+
+    # ------------------------------------------------------------ quadratic sieve
+    def qs(self, n: int):
+        n = int(n)
+        digits = len(str(n))
+        ln_n = math.log(n)
+        bound = int(math.exp(0.5 * math.sqrt(ln_n * math.log(ln_n))))
+        bound = max(bound, 300)
+        # factor base: primes p with n a quadratic residue mod p
+        fb, roots = [], []
+        for p in _primes_upto(bound):
+            p = int(p)
+            if p == 2:
+                fb.append(2)
+                roots.append(1)
+                continue
+            if pow(n % p, (p - 1) // 2, p) == 1:
+                fb.append(p)
+                roots.append(_tonelli(n % p, p))
+        nfb = len(fb)
+        need = nfb + 1 + 24                  # +1 for the sign column
+        self.log(f"  QS: {digits} digits, factor base {nfb} primes (bound {bound:,}), "
+                 f"need {need} relations")
+        s = math.isqrt(n) + 1
+        c0 = s * s - n                       # Q(x) = x*(x + 2s) + c0
+        fb_np = np.array(fb, dtype=np.int64)
+        roots_np = np.array(roots, dtype=np.int64)
+        s_mod = np.array([s % p for p in fb], dtype=np.int64)
+        r1 = np.array([(r - s) % p for r, p in zip(roots, fb)], dtype=np.int64)       # x = r - s
+        r2 = np.array([(-r - s) % p for r, p in zip(roots, fb)], dtype=np.int64)
+        logp = np.log2(fb_np.astype(np.float64)).astype(np.float32)
+        sieve_from = 6                                    # skip the tiniest primes while sieving
+        BS = 1 << 16 if digits < 45 else 1 << 17
+        slack = 1.4 * math.log2(fb[-1]) + 6
+        piv = {}                       # high bit -> (vector, history)
+        rels = []                      # (s + x, {prime_index: exponent}, sign)
+        block = 0
+        found = None
+        s_f = float(s)
+        while found is None:
+            for sign_blk in (1, -1):
+                self.check()
+                start = block * BS if sign_blk == 1 else -(block + 1) * BS
+                xs = np.arange(start, start + BS, dtype=np.int64)
+                xf = xs.astype(np.float64)
+                qf = np.abs(xf * (xf + 2 * s_f) + float(c0))
+                qf[qf < 1] = 1
+                target = np.log2(qf).astype(np.float32) - slack
+                acc = np.zeros(BS, dtype=np.float32)
+                for i in range(sieve_from, nfb):
+                    p = fb[i]
+                    lg = logp[i]
+                    for r in ((int(r1[i]), int(r2[i])) if r1[i] != r2[i] else (int(r1[i]),)):
+                        off = (r - start) % p
+                        acc[off::p] += lg
+                cand = np.nonzero(acc >= target)[0]
+                for ci in cand:
+                    x = int(start + ci)
+                    val = x * (x + 2 * s) + c0
+                    sign = 1 if val < 0 else 0
+                    v = abs(val)
+                    if v == 0:
+                        continue
+                    # which FB primes divide this value: x + s == +-root (mod p)
+                    xm = (x + s_mod) % fb_np
+                    hit = np.nonzero((xm == roots_np) | (xm == (fb_np - roots_np) % fb_np))[0]
+                    expo = {}
+                    for i in hit:
+                        p = fb[int(i)]
+                        e = 0
+                        while v % p == 0:
+                            v //= p
+                            e += 1
+                        if e:
+                            expo[int(i)] = e
+                    if v != 1:
+                        continue
+                    vec = sign
+                    for i, e in expo.items():
+                        if e & 1:
+                            vec |= 1 << (i + 1)
+                    rels.append((x + s, expo, sign))
+                    idx = len(rels) - 1
+                    hist = 1 << idx
+                    while vec:
+                        hb = vec.bit_length() - 1
+                        if hb in piv:
+                            pv, ph = piv[hb]
+                            vec ^= pv
+                            hist ^= ph
+                        else:
+                            piv[hb] = (vec, hist)
+                            break
+                    if vec == 0:
+                        d = self._qs_try(n, rels, hist, fb)
+                        if d:
+                            return d
+                self.progress(f"QS  {len(rels)}/{need} relations", min(1.0, len(rels) / need))
+            block += 1
+        return None
+
+    def _qs_try(self, n, rels, hist, fb):
+        x = 1
+        tot = {}
+        sign_count = 0
+        i = 0
+        while hist:
+            if hist & 1:
+                xv, expo, sg = rels[i]
+                x = x * xv % n
+                sign_count += sg
+                for k, e in expo.items():
+                    tot[k] = tot.get(k, 0) + e
+            hist >>= 1
+            i += 1
+        y = 1
+        for k, e in tot.items():
+            y = y * pow(fb[k], e // 2, n) % n
+        g = math.gcd(x - y, n)
+        return g if 1 < g < n else None
+
+
+def _tonelli(a: int, p: int) -> int:
+    """Square root of a mod an odd prime p (a is a quadratic residue)."""
+    if p % 4 == 3:
+        return pow(a, (p + 1) // 4, p)
+    q, s = p - 1, 0
+    while q % 2 == 0:
+        q //= 2
+        s += 1
+    z = 2
+    while pow(z, (p - 1) // 2, p) != p - 1:
+        z += 1
+    m, c, t, r = s, pow(z, q, p), pow(a, q, p), pow(a, (q + 1) // 2, p)
+    while t != 1:
+        i, t2 = 0, t
+        while t2 != 1:
+            t2 = t2 * t2 % p
+            i += 1
+        b = pow(c, 1 << (m - i - 1), p)
+        m, c, t, r = i, b * b % p, t * b * b % p, r * b % p
+    return r
 
 
 # ------------------------------------------------------------------ hidden-number guesser
@@ -384,6 +929,237 @@ class BinarySearch:
                         avg=(self.solved_guesses / self.solves if self.solves else None),
                         last=self.last, last_found=self.last_found,
                         secret=short_int(self._secret) if self.revealed else None)
+
+
+
+# ------------------------------------------------------------------ factoring by higher/lower search
+FACTOR_BITS_DEFAULT = 256
+FACTOR_BITS_MAX = 4096
+
+
+def short_dec(n: int, keep: int = 14) -> str:
+    s = str(n)
+    return s if len(s) <= 2 * keep + 3 else f"{s[:keep]}...{s[-keep:]} ({len(s)} digits)"
+
+
+def parse_number(text: str) -> int:
+    """Plain integer (spaces, commas, underscores allowed) or a form like 2^127-1."""
+    import re
+    t = re.sub(r"[\s,_]", "", text)
+    m = re.fullmatch(r"(\d+)\^(\d+)([+-]\d+)?", t)
+    if m:
+        a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+        if a < 2 or b * math.log2(a) > 20000:
+            raise ValueError("power too large (limit about 20000 bits)")
+        return a ** b + c
+    if t.isdigit():
+        return int(t)
+    raise ValueError("type digits, or a form like 2^127-1")
+
+
+class FactorSearch:
+    """Factoring with the higher/lower bit search, and a time code ONLY for a verified factorisation.
+
+    N is the number to factor. The oracle holds a prime factor p of N (the smallest one) and answers
+    only "is p >= this trial value?". Each armed frame (two sequential evens) is one query and pools
+    one bit of p, most significant bit first. No equality test is made per query. When all bits are
+    pooled, ONE final check runs: 1 < p < N, N % p == 0, and the full prime factorisation multiplies
+    back to N with every factor a probable prime. Only then is a time-code bin earned.
+
+    Where the oracle gets p:
+      * typed N : a background thread really factors N (trial division, Fermat, Pollard rho, p-1,
+                  ECM, quadratic sieve). Until it finishes the oracle is not ready, no bits are
+                  pooled and no time code can be earned.
+      * generated N : a random semiprime is built and its factors are kept inside the oracle. This
+                  shows the mechanism; the search does not factor N, the oracle already knows p.
+    A higher/lower oracle for a factor of N cannot exist without already knowing that factor, so the
+    pooling is a mechanism, not a shortcut: the cost of factoring is paid by the engine thread."""
+
+    def __init__(self, pool):
+        self._lock = threading.Lock()
+        self.pool = pool
+        self._run = 0
+        self.gen_bits = FACTOR_BITS_DEFAULT
+        self.state = "idle"             # idle generating factoring ready solved prime failed cancelled
+        self.mode = ""
+        self.n = 0
+        self.width = 0
+        self._secret = 0
+        self.factors = []
+        self.verified = False
+        self.progress = ""
+        self.msgs = []
+        self.revealed = False
+        self.pooled = self.pooled_n = 0
+        self.round_guesses = 0
+        self.guesses = self.final_checks = self.solves = 0
+        self.last = None
+        self.last_found = None          # (p, q, queries)
+        self.t_start = 0.0
+        self.engine_s = None
+
+    # ---------------------------------------------------------- bookkeeping
+    def _say(self, run, s):
+        with self._lock:
+            if run == self._run:
+                self.msgs.append(s)
+
+    def _prog(self, run, text, frac):
+        with self._lock:
+            if run == self._run:
+                self.progress = f"{text}  {frac:.0%}"
+
+    def drain(self):
+        with self._lock:
+            m, self.msgs = self.msgs, []
+            return m
+
+    def _begin(self, mode, state, n=0, keep_counts=False):
+        with self._lock:
+            self._run += 1
+            self.mode, self.state, self.n = mode, state, n
+            self.width = max(1, math.isqrt(n).bit_length()) if n else 0
+            self._secret, self.factors, self.verified = 0, [], False
+            self.pooled = self.pooled_n = self.round_guesses = 0
+            self.progress, self.revealed, self.engine_s = "", False, None
+            self.t_start = time.time()
+            if not keep_counts:
+                self.guesses = self.final_checks = self.solves = 0
+                self.last = self.last_found = None
+            return self._run
+
+    def cancel(self):
+        with self._lock:
+            self._run += 1
+            if self.state in ("generating", "factoring"):
+                self.state = "cancelled"
+                self.progress = ""
+                self.msgs.append("# factoriser: cancelled")
+
+    def reveal(self):
+        with self._lock:
+            self.revealed = True
+            return self._secret
+
+    # ---------------------------------------------------------- typed number
+    def factor_number(self, n: int):
+        n = int(n)
+        run = self._begin("typed", "factoring", n)
+        if n < 4:
+            with self._lock:
+                self.state = "failed"
+                self.progress = "N must be at least 4"
+            return
+        self._say(run, f"# factoriser: N = {short_dec(n)} ({n.bit_length()} bit), "
+                       f"{'gmpy2' if HAVE_GMP else 'plain Python ints'}")
+        threading.Thread(target=self._work_typed, args=(run, n), daemon=True).start()
+
+    def _work_typed(self, run, n):
+        fz = Factoriser(self.pool, lambda: self._run != run,
+                        lambda s: self._say(run, s), lambda t, f: self._prog(run, t, f))
+        t0 = time.time()
+        try:
+            fs = fz.factor(n)
+        except Cancelled:
+            return
+        except Exception as e:                                    # keep the GUI alive
+            with self._lock:
+                if run == self._run:
+                    self.state, self.progress = "failed", f"engine error: {e}"
+            return
+        ok = math.prod(fs) == n and all(is_probable_prime(p) for p in fs)
+        with self._lock:
+            if run != self._run:
+                return
+            self.engine_s = time.time() - t0
+            self.progress = ""
+            if not ok:
+                self.state, self.progress = "failed", "factorisation did not verify"
+            elif len(fs) == 1:
+                self.state = "prime"
+                self.msgs.append("# factoriser: N is (probably) prime, nothing to search")
+            else:
+                self.factors, self._secret, self.verified = fs, fs[0], True
+                self.state = "ready"
+                self.msgs.append("# factoriser: engine finished in "
+                                 f"{self.engine_s:.1f} s, oracle ready ({len(fs)} prime factors); "
+                                 "pooling bits on armed frames")
+
+    # ---------------------------------------------------------- generated semiprime
+    def generate(self, bits: int, keep_counts=False):
+        bits = max(16, min(FACTOR_BITS_MAX, int(bits)))
+        self.gen_bits = bits
+        run = self._begin("generated", "generating", 0, keep_counts)
+        threading.Thread(target=self._work_gen, args=(run, bits), daemon=True).start()
+
+    def _work_gen(self, run, bits):
+        def prime(b):
+            while True:
+                if self._run != run:
+                    raise Cancelled()
+                c = self.pool.rand_bits(b) | (1 << (b - 1)) | 1
+                if is_probable_prime(c):
+                    return c
+        try:
+            p = prime(bits // 2)
+            q = prime(bits - bits // 2)
+            while q == p:
+                q = prime(bits - bits // 2)
+        except Cancelled:
+            return
+        n, fs = p * q, sorted((p, q))
+        with self._lock:
+            if run != self._run:
+                return
+            self.n, self.width = n, max(1, math.isqrt(n).bit_length())
+            self.factors, self._secret, self.verified = fs, fs[0], True
+            self.state = "ready"
+            self.msgs.append(f"# factoriser: new semiprime N = {short_dec(n)} ({n.bit_length()} bit); "
+                             "its factors are held by the oracle")
+
+    # ---------------------------------------------------------- one armed frame = one oracle query
+    def guess(self) -> bool:
+        """Pools one bit. Only the query that completes the pool runs the single final check.
+        True only when that check verifies a correct factorisation."""
+        regen = False
+        with self._lock:
+            if self.state != "ready":
+                return False
+            self.guesses += 1
+            self.round_guesses += 1
+            shift = self.width - 1 - self.pooled_n
+            trial = self.pooled | (1 << shift)
+            bit = 1 if self._secret >= trial else 0            # higher/lower, no equality
+            self.pooled |= bit << shift
+            self.pooled_n += 1
+            if self.pooled_n < self.width:
+                self.last = f"pooled bit {self.pooled_n}/{self.width} = {bit}"
+                return False
+            self.final_checks += 1
+            c = self.pooled
+            ok = (1 < c < self.n and self.n % c == 0 and self.verified
+                  and math.prod(self.factors) == self.n)
+            if not ok:
+                self.last = "final check failed, pool cleared"
+                self.pooled = self.pooled_n = 0
+                return False
+            self.solves += 1
+            self.last_found = (c, self.n // c, self.round_guesses)
+            self.last = "FOUND: N % p == 0 and the factorisation multiplies back to N"
+            self.state = "solved"
+            regen = self.mode == "generated"
+        if regen:
+            self.generate(self.gen_bits, keep_counts=True)      # next semiprime, same size
+        return True
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(state=self.state, mode=self.mode, n=self.n, width=self.width,
+                        pooled_n=self.pooled_n, guesses=self.guesses, solves=self.solves,
+                        final_checks=self.final_checks, round_guesses=self.round_guesses,
+                        progress=self.progress, last=self.last, last_found=self.last_found,
+                        engine_s=self.engine_s, factors=list(self.factors) if self.state == "solved" else [],
+                        secret=short_dec(self._secret) if self.revealed and self._secret else None)
 
 
 # ------------------------------------------------------------------ time-code maths
@@ -712,6 +1488,7 @@ class SimThread(threading.Thread):
         ctl, out = self.ctl, self.out
         hidden = ctl.get("hidden")
         search = ctl.get("search")
+        fsearch = ctl.get("fsearch")
         try:
             src = Source(self.cam_index)
         except RuntimeError as e:
@@ -781,7 +1558,8 @@ class SimThread(threading.Thread):
         S = dict(frames=0, motion=0, in_L=0, acc_in_L=0, false_acc=0, accepts=0,
                  open_inL=0, acc_open_inL=0,
                  mined_even=0, last_x=0, last_even=False, last_armed=False,
-                 timecodes_added=0, hidden_timecodes=0, search_timecodes=0)
+                 timecodes_added=0, hidden_timecodes=0, search_timecodes=0,
+                 factor_timecodes=0)
 
         def codes_snapshot():
             """Time-code statistics from the hidden-number and bit searches."""
@@ -792,7 +1570,9 @@ class SimThread(threading.Thread):
                 timecodes_added=S["timecodes_added"],
                 hidden_timecodes=S["hidden_timecodes"],
                 search_timecodes=S["search_timecodes"],
+                factor_timecodes=S["factor_timecodes"],
                 search=S.get("search"),
+                fsearch=S.get("fsearch"),
                 hidden=S.get("hidden"),
                 timecode_pending=int(ctl.get("timecode_pending", 0)))
 
@@ -850,6 +1630,8 @@ class SimThread(threading.Thread):
                 # ---- witness source: the motion pattern (same camera, no noise)
                 energy = np.where(mask, np.clip(diff, 0, 255), 0).astype(np.uint8)
                 digest = hashlib.sha256(energy.tobytes()).digest()
+                if ctl.get("pool") is not None:
+                    ctl["pool"].feed(digest)            # camera motion seeds the factoriser randomness
                 pkt = Packet(idx, dt, x, motion, int.from_bytes(digest, "big"))
 
                 # A hidden-number spot check or a search guess is only allowed after TWO SEQUENTIAL even
@@ -890,6 +1672,21 @@ class SimThread(threading.Thread):
                                                     found=sn["last_found"])))
                 if search is not None:
                     S["search"] = search.snapshot()
+
+                # Factoriser: one higher/lower query per armed frame; a time code is earned ONLY when the
+                # single final check verifies a correct factorisation (separate source, own counter).
+                factor_hit = False
+                if fsearch is not None and ctl.get("fsearch_on", True) and even_state:
+                    factor_hit = fsearch.guess()
+                    if factor_hit:
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        S["factor_timecodes"] += 1
+                        S["timecodes_added"] += 1
+                        fn = fsearch.snapshot()
+                        out.put(("factor_hit", dict(frame=idx, x=x, found=fn["last_found"],
+                                                    solves=fn["solves"])))
+                if fsearch is not None:
+                    S["fsearch"] = fsearch.snapshot()
                 # ---- drivers A and B on this frame, concurrently; then flip-flop
                 run_circuit = ctl.get("circuit", True)
                 if run_circuit:
@@ -935,7 +1732,7 @@ class SimThread(threading.Thread):
                     c_of_x=st.c_of_x, vC=st.vC, vB=st.vB, traj=st.traj,
                     node=st.node, orv=st.orv, andv=st.andv, gate=st.gate,
                     y_bin=st.y_bin, Q=st.Q, select=select, stats=dict(S),
-                    hidden_hit=hidden_hit, search_hit=search_hit)))
+                    hidden_hit=hidden_hit, search_hit=search_hit, factor_hit=factor_hit)))
                 idx += 1
         finally:
             for q in (qa, qb, qc, qn):
@@ -1068,6 +1865,9 @@ class App:
         self.ctl["hidden"] = self.hidden
         self.search = BinarySearch(SEARCH_BITS_DEFAULT)
         self.ctl["search"] = self.search
+        self.pool = EntropyPool()
+        self.fsearch = FactorSearch(self.pool)
+        self.ctl.update(fsearch=self.fsearch, fsearch_on=True, pool=self.pool)
         self.photos = [None, None, None]
         self.q_hist = deque(maxlen=84)          # (Q, y_bin, motion)
         self.x_hist = deque(maxlen=150)
@@ -1122,6 +1922,7 @@ class App:
         window.after(200, self._auto_compact)
         root.protocol("WM_DELETE_WINDOW", self._close)
         root.after(15, self._poll)
+        root.after(300, self._factor_tick)
 
     # ---------------------------------------------------------- compact mode
     def _apply_compact(self):
@@ -1235,6 +2036,7 @@ class App:
         self.log.pack(fill="y", expand=True)
         self._hidden_panel(right)
         self._search_panel(right)
+        self._factor_panel(right)
 
     def _hidden_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Hidden number (spot check after 2 sequential evens)")
@@ -1331,6 +2133,82 @@ class App:
             f"last FOUND number: {found}\n"
             f"current secret: {sec}"))
 
+    def _factor_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Factoriser (higher/lower bit search; time code only after a verified factorisation)")
+        box.pack(fill="x", pady=(8, 0))
+        row = ttk.Frame(box)
+        row.pack(anchor="w", padx=6, pady=(4, 0))
+        self.v_fs_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="Enabled", variable=self.v_fs_on,
+                        command=lambda: self.ctl.update(fsearch_on=self.v_fs_on.get())).pack(side="left")
+        ttk.Label(row, text="N =").pack(side="left", padx=(12, 2))
+        self.e_fn = ttk.Entry(row, width=46)
+        self.e_fn.pack(side="left")
+        self.e_fn.bind("<Return>", lambda e: self._factor_go())
+        ttk.Button(row, text="Factor N", command=self._factor_go).pack(side="left", padx=(8, 2))
+        ttk.Button(row, text="Cancel", command=self._factor_cancel).pack(side="left", padx=2)
+        row2 = ttk.Frame(box)
+        row2.pack(anchor="w", padx=6, pady=(4, 0))
+        ttk.Label(row2, text="or random semiprime, bits").pack(side="left")
+        self.v_fbits = tk.StringVar(value=str(FACTOR_BITS_DEFAULT))
+        ttk.Spinbox(row2, from_=16, to=FACTOR_BITS_MAX, increment=64, width=6,
+                    textvariable=self.v_fbits).pack(side="left", padx=(4, 6))
+        ttk.Button(row2, text="Generate", command=self._factor_generate).pack(side="left", padx=2)
+        ttk.Button(row2, text="Reveal factor", command=self._factor_reveal).pack(side="left", padx=2)
+        fbox, self.l_factor = fixed_label(box, 480, 118, text="", font=("Consolas", 9),
+                                          justify="left", wraplength=480)
+        fbox.pack(anchor="w", padx=6, pady=(2, 4))
+        set_text(self.l_factor, "type N and press Factor N, or generate a semiprime")
+
+    def _factor_go(self):
+        try:
+            n = parse_number(self.e_fn.get())
+        except ValueError as e:
+            messagebox.showerror("Number", str(e))
+            return
+        self.fsearch.factor_number(n)
+
+    def _factor_generate(self):
+        try:
+            bits = int(self.v_fbits.get().strip())
+        except ValueError:
+            return
+        self.fsearch.generate(bits)
+
+    def _factor_cancel(self):
+        self.fsearch.cancel()
+
+    def _factor_reveal(self):
+        self.fsearch.reveal()
+        v = self.fsearch.snapshot()["secret"]
+        self._log(f"# factor revealed: {v}" if v else "# factor not known yet")
+
+    def _factor_tick(self):
+        for s in self.fsearch.drain():
+            self._log(s)
+        self._show_factor(self.fsearch.snapshot())
+        self.root.after(300, self._factor_tick)
+
+    def _show_factor(self, h):
+        st = {"idle": "idle", "generating": "building a semiprime", "factoring": "ENGINE RUNNING: oracle not ready",
+              "ready": "READY: pooling bits on armed frames", "solved": "SOLVED and verified",
+              "prime": "N is prime", "failed": "failed", "cancelled": "cancelled"}.get(h["state"], h["state"])
+        nn = "-" if not h["n"] else short_dec(h["n"], 12) + f", {h['n'].bit_length()} bit"
+        lines = [f"state: {st}",
+                 f"N: {nn}   mode: {h['mode'] or '-'}",
+                 f"pooled {h['pooled_n']}/{h['width']} bits   queries {h['guesses']}   "
+                 f"final checks {h['final_checks']}   verified solves {h['solves']}"]
+        if h["progress"]:
+            lines.append("engine: " + h["progress"])
+        elif h["last"]:
+            lines.append("last: " + h["last"])
+        lf = h["last_found"]
+        if lf:
+            lines.append(f"p = {short_dec(lf[0], 12)}   q = {short_dec(lf[1], 12)}   ({lf[2]} queries)")
+        if h["secret"]:
+            lines.append("oracle factor: " + h["secret"])
+        set_text(self.l_factor, "\n".join(lines))
+
     def _hidden_range_changed(self, _e=None):
         try:
             n = int(self.v_hrange.get().strip())
@@ -1387,7 +2265,8 @@ class App:
         self._show_search(m.get("search"))
         set_text(self.l_miner, (
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
-            f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
+            f"search: {m['search_timecodes']}, factor: {m['factor_timecodes']}, "
+            f"pending {m['timecode_pending']})\n"
             f"Armed frames (2 evens in a row): {m['armed_frames']}\n"
             f"{'ARMED' if m['last_armed'] else 'not armed'}"
             f"{'' if m['circuit'] else '  [circuit OFF: press Start circuit]'}"))
@@ -1657,6 +2536,7 @@ class App:
 
     def _close(self):
         self.ctl["stop"] = True
+        self.fsearch.cancel()
         self.hidden.stop()
         self.root.after(150, self.root.destroy)
 
@@ -1691,6 +2571,13 @@ class App:
                               f"{sh['bits']}-bit secret found in {n} guesses "
                               f"(avg {avg}); time code added")
                     self._log(f"  number (hex, {val.bit_length()} bit): {val:x}")
+                elif kind == "factor_hit":
+                    fh = ev[1]
+                    p, q, n = fh["found"]
+                    self._log(f"FACTORISATION VERIFIED frame {fh['frame']:5d} x={fh['x']} "
+                              f"p found in {n} queries; time code added")
+                    self._log(f"  p = {short_dec(p, 30)}")
+                    self._log(f"  q = {short_dec(q, 30)}")
                 elif kind == "analysis":
                     self.an_lines = ev[1]
                     self._show_analysis()
@@ -1765,7 +2652,8 @@ class App:
         self._lit("Y", d["y_bin"],
                   f"[{self.ctl['y']}]  bin {d['idx'] % len(self.ctl['y'])}={d['y_bin']}"
                   + (" +HIDDEN" if d.get("hidden_hit") else "")
-                  + (" +SEARCH" if d.get("search_hit") else ""))
+                  + (" +SEARCH" if d.get("search_hit") else "")
+                  + (" +FACTOR" if d.get("factor_hit") else ""))
         self._lit("ff", d["Q"], f"Q = {d['Q']}", GOOD)
         self._lit("clk", False, f"frame {d['idx']}  {round(d['dt'] * 1000, -1):.0f} ms")
         lamp = "#3cb043" if d["select"] else "#ddd"
@@ -1792,7 +2680,7 @@ class App:
             f"x in L (odd composite): {S['in_L']}  accepted: {S['acc_in_L']}  ({rate:.0%})\n"
             f"x not in L accepted (false accepts): {S['false_acc']}\n"
             f"time codes added: {S['timecodes_added']} (hidden {S['hidden_timecodes']}, "
-            f"search {S['search_timecodes']})"))
+            f"search {S['search_timecodes']}, factor {S['factor_timecodes']})"))
 
     def _frame_log(self, d):
         kind = "odd composite" if d["in_L"] else ("even" if d["x"] % 2 == 0 else "prime/small")
