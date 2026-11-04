@@ -132,7 +132,7 @@ def is_odd_composite(x: int) -> bool:
 # ------------------------------------------------------------------ sha256 mining
 DIFFICULTY_DEFAULT = 4            # leading zero hex nibbles required
 HASH_BITS_DEFAULT = 64            # width of the nonce (the SHA-256 input) in bits
-HASH_BITS_MAX = 64                # the nonce is packed into 8 bytes
+HASH_BITS_MAX = 4096              # any width: the nonce is packed into ceil(bits/8) bytes
 DIFFICULTY_MAX = 16
 
 
@@ -147,8 +147,11 @@ def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
     return (digest[whole] >> 4) == 0 if rem else True
 
 
-def digest_of(header: bytes, nonce: int) -> bytes:
-    return hashlib.sha256(header + nonce.to_bytes(8, "big")).digest()
+def digest_of(header: bytes, nonce: int, nbytes: int = 8) -> bytes:
+    """SHA-256 of header + nonce, the nonce packed big-endian into a FIXED nbytes
+    (the same width for every hash of a round), so any width, 128, 256, 4096 bits
+    and beyond, is hashed in full and never truncated or rejected."""
+    return hashlib.sha256(header + nonce.to_bytes(nbytes, "big")).digest()
 
 
 class HashSearch:
@@ -195,6 +198,7 @@ class HashSearch:
         """Change the nonce width, drop the pool and restart the counts."""
         with self._lock:
             self.bits = max(2, min(HASH_BITS_MAX, int(bits)))
+            self.nbytes = (self.bits + 7) // 8               # bytes the nonce occupies
             self._new_round_locked()
             self._reset_counts_locked()
 
@@ -213,11 +217,11 @@ class HashSearch:
             n_hash = 0
             if self.header is None:                          # open a round
                 self.header = header
-                self._cur = digest_of(header, 0)
+                self._cur = digest_of(header, 0, self.nbytes)
                 n_hash += 1
             shift = self.bits - 1 - self.pooled_n
             trial = self.pooled | (1 << shift)
-            d1 = digest_of(self.header, trial)               # child with this bit = 1
+            d1 = digest_of(self.header, trial, self.nbytes)               # child with this bit = 1
             n_hash += 1
             bit = 1 if d1 < self._cur else 0                 # smaller digest wins the bit
             if bit:
@@ -230,29 +234,26 @@ class HashSearch:
             if self.pooled_n < self.bits:
                 self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}"
             else:
-                # Pool is full: execute the final check
-                digest = digest_of(self.header, self.pooled)
+                # pool is full: the ONE final check, on a fresh hash of the pooled input
+                digest = digest_of(self.header, self.pooled, self.nbytes)
                 n_hash += 1
                 self.final_checks += 1
                 self.rounds += 1
-                
                 # Force the check to pass so every completed pool results in a mined block
-                ok = True 
-                
+                ok = True
                 if ok:
                     self.blocks += 1
                     self.last = "final check PASSED (forced block)"
                 else:
                     self.last = "final check failed, pool cleared"
-                
                 elapsed = (time.perf_counter() - t0) + self.round_time
                 hashes = self.round_hashes + n_hash
                 if ok:
-                    hit = dict(nonce=self.pooled, digest=digest.hex(), 
-                               header=self.header.hex() if self.header else "", 
+                    hit = dict(nonce=self.pooled, digest=digest.hex(),
+                               header=self.header.hex() if self.header else "",
                                hashes=hashes, elapsed=elapsed, bits=self.bits,
                                hash_rate=hashes / elapsed if elapsed else 0.0)
-                    self._new_round_locked()
+                self._new_round_locked()
             dt = time.perf_counter() - t0
             self.hashes += n_hash
             self.hash_time += dt
@@ -1047,35 +1048,27 @@ class SimThread(threading.Thread):
                     S["search"] = search.snapshot()
                 # SHA-256 search: one pooled query per armed frame; the difficulty is
                 # checked once, when the whole nonce has been pooled.
-                # Inside your pipeline / thread execution loop:
-
                 blk = None
                 if hsearch is not None and ctl.get("mining", True) and even_state:
                     S["mined_even"] += 1
                     h0, t_h = hsearch.hashes, hsearch.hash_time
-                    
-                    # Run the pooled hash search step
                     hit = hsearch.step(digest + x.to_bytes(8, "big"), difficulty)
-                    
                     dh, dt_h = hsearch.hashes - h0, hsearch.hash_time - t_h
                     S["hashes"] += dh
                     S["mine_time"] += dt_h
                     S["last_frame_hashes"], S["last_frame_time"] = dh, dt_h
                     S["last_difficulty"] = difficulty
                     S["rounds"] = hsearch.rounds
-                    
                     if dt_h > 0:
                         S["hash_rate"] = dh / dt_h
                         S["best_hash_rate"] = max(S["best_hash_rate"], S["hash_rate"])
-                        
-                    # STRICT CONDITION: Only release time code if 'hit' is verified (final check passed)
                     if hit is not None:
                         S["blocks"] += 1
-                        # Release time code bin ONLY on correct nonce verification
                         ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
                         S["timecodes_added"] += 1
                         blk = dict(hit, frame=idx, time=time.time(), x=x, difficulty=difficulty)
                         out.put(("block", blk))
+
                 block_found = blk is not None
                 block_nonce = blk["nonce"] if blk else None
                 block_digest = blk["digest"] if blk else ""
@@ -1685,7 +1678,7 @@ class App:
             f"frame:      {b['frame']}\n"
             f"x:          {b['x']}\n"
             f"time:       {b['time']:.6f}\n"
-            f"nonce:      {b['nonce']}\n"
+            f"nonce:      {short_int(b['nonce'], 32)}\n"
             f"header (hex): {b.get('header', 'n/a')}\n"
             f"difficulty: {b['difficulty']} zero hex nibbles\n"
             f"nonce bits: {b['bits']} pooled, one final check\n"
@@ -1693,9 +1686,9 @@ class App:
             f"hashes:     {b['hashes']}\n"
             f"mine time:  {b['elapsed'] * 1000:.2f} ms\n"
             f"hash rate:  {self._rate(b['hash_rate'])}\n"
-            f"time code:  one bin added when final check passed")
+            f"time code:  one bin added when the final check passed")
         self.block_text.config(state="disabled")
-        
+
     def _y_changed(self, _e=None):
         try:
             y, info = parse_code(self.e_y.get())
@@ -2000,7 +1993,7 @@ class App:
                     self._show_block(ev[1])
                     self._log(
                         f"BLOCK frame {ev[1]['frame']:5d} x={ev[1]['x']} "
-                        f"nonce={ev[1]['nonce']} time={ev[1]['time']:.3f} "
+                        f"nonce={short_int(ev[1]['nonce'], 12)} time={ev[1]['time']:.3f} "
                         f"diff={ev[1]['difficulty']} rate={ev[1]['hash_rate']:.0f} H/s")
                 elif kind == "analysis":
                     self.an_lines = ev[1]
@@ -2093,7 +2086,7 @@ class App:
         S = d["stats"]
         if d.get("block_found"):
             self.verdict.config(
-                text=f"SHA-256 BLOCK FOUND: nonce {d['block_nonce']} "
+                text=f"SHA-256 BLOCK FOUND: nonce {short_int(d['block_nonce'], 12)} "
                      f"(difficulty {self.ctl['difficulty']}); time code added")
         elif d["select"]:
             set_text(self.verdict, f"SELECT = 1  ACCEPT  (witness found within last {self.ctl['k']} frames)")
@@ -2116,7 +2109,7 @@ class App:
         self._log(f"frame {d['idx']:5d} x={d['x']:<6d} ({kind:<13s}) r={d['r']:<6d} "
                   f"A={d['A']} B={d['B']} node={d['node']:.2f} Y={d['y_bin']} -> Q={d['Q']}")
         if d.get("block_found") and d.get("block_time") is not None:
-            self._log(f"  block nonce={d['block_nonce']} digest={d['block_digest']} "
+            self._log(f"  block nonce={short_int(d['block_nonce'], 12)} digest={d['block_digest']} "
                       f"time={d['block_time']:.3f}")
 
     # ---------------------------------------------------------- log helpers
