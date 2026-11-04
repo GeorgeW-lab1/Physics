@@ -86,6 +86,7 @@ sees. There is no simulated source; if the camera can't be opened, it says so.
 """
 import asyncio
 import hashlib
+import json
 import math
 import queue
 import secrets
@@ -95,7 +96,7 @@ import time
 import tkinter as tk
 from collections import deque
 from dataclasses import dataclass, field
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 import numpy as np
 
@@ -945,7 +946,10 @@ def short_dec(n: int, keep: int = 14) -> str:
 def parse_number(text: str) -> int:
     """Plain integer (spaces, commas, underscores allowed) or a form like 2^127-1."""
     import re
-    t = re.sub(r"[\s,_]", "", text)
+    t = re.sub(r"[\s,_]", "", text).lstrip("+")
+    if re.fullmatch(r"0[xX][0-9a-fA-F]+", t):
+        return int(t, 16)
+    t = re.sub(r"[lLnN]$", "", t) if re.fullmatch(r"\d+[lLnN]", t) else t
     m = re.fullmatch(r"(\d+)\^(\d+)([+-]\d+)?", t)
     if m:
         a, b, c = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
@@ -995,6 +999,7 @@ class FactorSearch:
         self.guesses = self.final_checks = self.solves = 0
         self.last = None
         self.last_found = None          # (p, q, queries)
+        self.history = []               # every number the engine finished / every verified solve
         self.t_start = 0.0
         self.engine_s = None
 
@@ -1027,6 +1032,23 @@ class FactorSearch:
                 self.guesses = self.final_checks = self.solves = 0
                 self.last = self.last_found = None
             return self._run
+
+    def _record(self, mode, n, factors, status, **extra):
+        """Caller holds self._lock. Big ints are stored as decimal strings (JSON-safe)."""
+        self.history.append(dict(time=time.strftime("%Y-%m-%d %H:%M:%S"), mode=mode, status=status,
+                                 n=str(n), bits=int(n).bit_length(),
+                                 factors=[str(f) for f in factors],
+                                 **{k: (str(v) if isinstance(v, int) and v > 2**53 else v)
+                                    for k, v in extra.items()}))
+
+    def export(self) -> dict:
+        with self._lock:
+            cur = dict(state=self.state, mode=self.mode, n=str(self.n) if self.n else None,
+                       factors=[str(f) for f in self.factors],
+                       secret=str(self._secret) if self.revealed and self._secret else None)
+            return dict(saved=time.strftime("%Y-%m-%d %H:%M:%S"), current=cur,
+                        verified_solves=self.solves, queries=self.guesses,
+                        history=list(self.history))
 
     def cancel(self):
         with self._lock:
@@ -1077,10 +1099,14 @@ class FactorSearch:
                 self.state, self.progress = "failed", "factorisation did not verify"
             elif len(fs) == 1:
                 self.state = "prime"
-                self.msgs.append("# factoriser: N is (probably) prime, nothing to search")
+                self._record("typed", n, fs, "prime")
+                self.msgs.append(f"# factoriser: N = {short_dec(n)} is (probably) prime ({n.bit_length()} bit). "
+                                 "A prime has no factor p with 1 < p < N, so there is no oracle and no "
+                                 "time code to earn. Type a composite N, or press Generate.")
             else:
                 self.factors, self._secret, self.verified = fs, fs[0], True
                 self.state = "ready"
+                self._record("typed", n, fs, "factored")
                 self.msgs.append("# factoriser: engine finished in "
                                  f"{self.engine_s:.1f} s, oracle ready ({len(fs)} prime factors); "
                                  "pooling bits on armed frames")
@@ -1145,6 +1171,7 @@ class FactorSearch:
                 return False
             self.solves += 1
             self.last_found = (c, self.n // c, self.round_guesses)
+            self._record(self.mode, self.n, self.factors, "solved", p=c, queries=self.round_guesses)
             self.last = "FOUND: N % p == 0 and the factorisation multiplies back to N"
             self.state = "solved"
             regen = self.mode == "generated"
@@ -2147,6 +2174,7 @@ class App:
         self.e_fn.bind("<Return>", lambda e: self._factor_go())
         ttk.Button(row, text="Factor N", command=self._factor_go).pack(side="left", padx=(8, 2))
         ttk.Button(row, text="Cancel", command=self._factor_cancel).pack(side="left", padx=2)
+        ttk.Button(row, text="Save numbers", command=self._factor_save).pack(side="left", padx=2)
         row2 = ttk.Frame(box)
         row2.pack(anchor="w", padx=6, pady=(4, 0))
         ttk.Label(row2, text="or random semiprime, bits").pack(side="left")
@@ -2175,6 +2203,24 @@ class App:
             return
         self.fsearch.generate(bits)
 
+    def _factor_save(self):
+        data = self.fsearch.export()
+        if not data["history"] and not data["current"]["n"]:
+            messagebox.showinfo("Save numbers", "No numbers yet: type N and press Factor N, or Generate.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save numbers", defaultextension=".json", initialfile="factor_numbers.json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            messagebox.showerror("Save numbers", str(e))
+            return
+        self._log(f"# saved {len(data['history'])} number record(s) to {path}")
+
     def _factor_cancel(self):
         self.fsearch.cancel()
 
@@ -2192,7 +2238,7 @@ class App:
     def _show_factor(self, h):
         st = {"idle": "idle", "generating": "building a semiprime", "factoring": "ENGINE RUNNING: oracle not ready",
               "ready": "READY: pooling bits on armed frames", "solved": "SOLVED and verified",
-              "prime": "N is prime", "failed": "failed", "cancelled": "cancelled"}.get(h["state"], h["state"])
+              "prime": "N is PRIME: nothing to factor, no oracle (type a composite)", "failed": "failed", "cancelled": "cancelled"}.get(h["state"], h["state"])
         nn = "-" if not h["n"] else short_dec(h["n"], 12) + f", {h['n'].bit_length()} bit"
         lines = [f"state: {st}",
                  f"N: {nn}   mode: {h['mode'] or '-'}",
