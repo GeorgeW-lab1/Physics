@@ -1123,7 +1123,7 @@ class App:
                           command=lambda v, key=key: (self.ctl.update({key: int(float(v))}),
                                                       self._refresh_analysis()))
             s.pack(side="left", padx=(2, 10))
-        scale("pixel diff >", "thr", 4, 60, 18)
+        scale("pixel diff >", "thr", 4, 60, 4)
         scale("min moving px", "min_px", 5, 800, 30)
         scale("k frames", "k", 1, 30, 5)
 
@@ -1162,7 +1162,7 @@ class App:
         left.pack_propagate(False)
         left.pack(side="left", anchor="n", padx=8, pady=8)
 
-        self.v_mining = tk.BooleanVar(value=True)
+        self.v_mining = tk.BooleanVar(value=False)
         ttk.Checkbutton(left, text="Mining enabled", variable=self.v_mining,
                         command=lambda: self.ctl.update(mining=self.v_mining.get())
                         ).pack(anchor="w")
