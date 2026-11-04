@@ -132,8 +132,8 @@ def is_odd_composite(x: int) -> bool:
 # ------------------------------------------------------------------ sha256 mining
 DIFFICULTY_DEFAULT = 4            # leading zero hex nibbles required
 HASH_BITS_DEFAULT = 64            # width of the nonce (the SHA-256 input) in bits
-HASH_BITS_MAX = 64                # the nonce is packed into 8 bytes
-DIFFICULTY_MAX = 16
+HASH_BITS_MAX = 128                # the nonce is packed into 8 bytes
+DIFFICULTY_MAX = 32
 
 
 def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
@@ -147,8 +147,9 @@ def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
     return (digest[whole] >> 4) == 0 if rem else True
 
 
-def digest_of(header: bytes, nonce: int) -> bytes:
-    return hashlib.sha256(header + nonce.to_bytes(8, "big")).digest()
+def digest_of(header: bytes, nonce: int, bits: int = 64) -> bytes:
+    n_bytes = max(1, (bits + 7) // 8)
+    return hashlib.sha256(header + nonce.to_bytes(n_bytes, "big")).digest()
 
 
 class HashSearch:
@@ -203,23 +204,25 @@ class HashSearch:
             self._new_round_locked()
             self._reset_counts_locked()
 
+    def _digest(self, header: bytes, nonce: int) -> bytes:
+        n_bytes = max(1, (self.bits + 7) // 8)
+        return hashlib.sha256(header + nonce.to_bytes(n_bytes, "big")).digest()
+
     def step(self, header: bytes, difficulty: int):
-        """One query. `header` is used only to open a round. Pools one bit; only the
-        query that fills the pool runs the single final check. Returns a dict
-        (nonce, digest, hashes, elapsed, hash_rate, bits) when that check passes,
-        else None."""
         t0 = time.perf_counter()
         with self._lock:
             n_hash = 0
-            if self.header is None:                          # open a round
+            if self.header is None:
                 self.header = header
-                self._cur = digest_of(header, 0)
+                self._cur = self._digest(header, 0)
                 n_hash += 1
+            
             shift = self.bits - 1 - self.pooled_n
             trial = self.pooled | (1 << shift)
-            d1 = digest_of(self.header, trial)               # child with this bit = 1
+            d1 = self._digest(self.header, trial)
             n_hash += 1
-            bit = 1 if d1 < self._cur else 0                 # smaller digest wins the bit
+            bit = 1 if d1 < self._cur else 0
+            
             if bit:
                 self.pooled = trial
                 self._cur = d1
@@ -230,33 +233,31 @@ class HashSearch:
             if self.pooled_n < self.bits:
                 self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}"
             else:
-                # Pool is full: execute the final check
-                digest = digest_of(self.header, self.pooled)
+                digest = self._digest(self.header, self.pooled)
                 n_hash += 1
                 self.final_checks += 1
                 self.rounds += 1
                 
-                # Force the check to pass so every completed pool results in a mined block
-                ok = True 
+                ok = hash_meets_difficulty(digest, difficulty)
                 
                 if ok:
                     self.blocks += 1
-                    self.last = "final check PASSED (forced block)"
+                    self.last = "final check PASSED"
                 else:
                     self.last = "final check failed, pool cleared"
                 
                 elapsed = (time.perf_counter() - t0) + self.round_time
                 hashes = self.round_hashes + n_hash
                 if ok:
-                    hit = dict(nonce=self.pooled, digest=digest.hex(), 
-                               header=self.header.hex() if self.header else "", 
-                               hashes=hashes, elapsed=elapsed, bits=self.bits,
+                    hit = dict(nonce=self.pooled, digest=digest.hex(), hashes=hashes,
+                               elapsed=elapsed, bits=self.bits,
                                hash_rate=hashes / elapsed if elapsed else 0.0)
-                    self._new_round_locked()
+                self._new_round_locked()
+            
             dt = time.perf_counter() - t0
             self.hashes += n_hash
             self.hash_time += dt
-            if self.header is not None:                      # round still open
+            if self.header is not None:
                 self.round_hashes += n_hash
                 self.round_time += dt
             self.last_rate = n_hash / dt if dt > 0 else 0.0
