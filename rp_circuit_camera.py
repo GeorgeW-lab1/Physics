@@ -61,12 +61,12 @@ are pooled is the candidate compared with the secret, once. A 1000-bit secret fa
 1000 pooled queries plus 1 final check instead of about 2^1000 blind guesses. A found secret earns
 one time-code bin and a new secret is hidden.
 
-Hidden-number test (separate from the SHA-256 miner): a secret integer is drawn in
+Hidden-number test (separate from the bit search): a secret integer is drawn in
 0..range-1. A separate clock thread cycles a candidate through that range at a frequency
 that you set in the GUI (1 Hz to 2 kHz, default 17 Hz). The thread never sees the
 secret. Only when two sequential EVEN states have arrived does the frame loop spot-check the candidate AT
 THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a found
-block). After EVERY spot check, hit or miss, a new secret is hidden. Expected hits = checks / range.
+secret). After EVERY spot check, hit or miss, a new secret is hidden. Expected hits = checks / range.
 "New secret" (and changing the range) draws a fresh secret and zeroes the spot checks,
 hits and luck factor. The luck factor is hits / expected hits in percent (100% = average),
 shown with P(>= hits by chance), the binomial tail probability.
@@ -127,148 +127,6 @@ def is_odd_composite(x: int) -> bool:
     if x < 9 or x % 2 == 0:
         return False
     return any(x % d == 0 for d in range(3, int(x ** 0.5) + 1, 2))
-
-
-# ------------------------------------------------------------------ sha256 mining
-DIFFICULTY_DEFAULT = 4            # leading zero hex nibbles required
-HASH_BITS_DEFAULT = 64            # width of the nonce (the SHA-256 input) in bits
-HASH_BITS_MAX = 64                # the nonce is packed into 8 bytes
-DIFFICULTY_MAX = 16
-
-
-def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
-    """True if the digest starts with `difficulty` zero hex nibbles."""
-    if difficulty <= 0:
-        return True
-    difficulty = min(difficulty, len(digest) * 2)
-    whole, rem = divmod(difficulty, 2)
-    if digest[:whole] != b"\x00" * whole:
-        return False
-    return (digest[whole] >> 4) == 0 if rem else True
-
-
-def digest_of(header: bytes, nonce: int) -> bytes:
-    return hashlib.sha256(header + nonce.to_bytes(8, "big")).digest()
-
-
-class HashSearch:
-    """SHA-256 input/output search with POOLED bits (same template as BinarySearch).
-
-    The input is a `bits`-bit nonce. Each step() is one query that yields exactly
-    one bit of it, most significant bit first: the two children of the current
-    pool (next bit 0 / next bit 1, remaining bits 0) are hashed and the bit is 1
-    when the digest with the bit set is the smaller one. The bit goes into the
-    pool and NO difficulty check is made on that query. Only when all `bits` bits
-    are pooled is the pooled nonce hashed once and tested against the difficulty,
-    one final check. A hit earns one time-code bin; hit or miss, the next round
-    starts with a fresh header and an empty pool.
-
-    SHA-256 has no real higher/lower signal, so unlike BinarySearch the pooled
-    nonce is not guaranteed to be a hit: the final check is what decides."""
-
-    def __init__(self, bits=HASH_BITS_DEFAULT):
-        self._lock = threading.Lock()
-        self.bits = 2
-        self.queries = 0                    # pooled queries since the last reset
-        self.hashes = 0                     # SHA-256 evaluations since the last reset
-        self.final_checks = 0               # difficulty checks made (one per full pool)
-        self.blocks = 0                     # final checks that passed
-        self.rounds = 0                     # finished rounds (hit or miss)
-        self.hash_time = 0.0                # seconds spent hashing
-        self.last = None                    # text of the latest query / check
-        self.set_bits(bits)
-
-    def _new_round_locked(self):
-        self.header = None
-        self.pooled = 0                     # nonce bits collected, MSB first
-        self.pooled_n = 0
-        self._cur = None                    # digest of the pooled nonce so far
-        self.round_hashes = 0
-        self.round_time = 0.0
-
-    def _reset_counts_locked(self):
-        self.queries = self.hashes = self.final_checks = self.blocks = self.rounds = 0
-        self.hash_time = 0.0
-        self.last = None
-
-    def set_bits(self, bits: int):
-        """Change the nonce width, drop the pool and restart the counts."""
-        with self._lock:
-            self.bits = max(2, min(HASH_BITS_MAX, int(bits)))
-            self._new_round_locked()
-            self._reset_counts_locked()
-
-    def reset(self):
-        with self._lock:
-            self._new_round_locked()
-            self._reset_counts_locked()
-
-    def step(self, header: bytes, difficulty: int):
-        """One query. `header` is used only to open a round. Pools one bit; only the
-        query that fills the pool runs the single final check. Returns a dict
-        (nonce, digest, hashes, elapsed, hash_rate, bits) when that check passes,
-        else None."""
-        t0 = time.perf_counter()
-        with self._lock:
-            n_hash = 0
-            if self.header is None:                          # open a round
-                self.header = header
-                self._cur = digest_of(header, 0)
-                n_hash += 1
-            shift = self.bits - 1 - self.pooled_n
-            trial = self.pooled | (1 << shift)
-            d1 = digest_of(self.header, trial)               # child with this bit = 1
-            n_hash += 1
-            bit = 1 if d1 < self._cur else 0                 # smaller digest wins the bit
-            if bit:
-                self.pooled = trial
-                self._cur = d1
-            self.pooled_n += 1
-            self.queries += 1
-
-            hit = None
-            if self.pooled_n < self.bits:
-                self.last = f"pooled bit {self.pooled_n}/{self.bits} = {bit}"
-            else:
-                # Pool is full: execute the final check
-                digest = digest_of(self.header, self.pooled)
-                n_hash += 1
-                self.final_checks += 1
-                self.rounds += 1
-                
-                # Force the check to pass so every completed pool results in a mined block
-                ok = True 
-                
-                if ok:
-                    self.blocks += 1
-                    self.last = "final check PASSED (forced block)"
-                else:
-                    self.last = "final check failed, pool cleared"
-                
-                elapsed = (time.perf_counter() - t0) + self.round_time
-                hashes = self.round_hashes + n_hash
-                if ok:
-                    hit = dict(nonce=self.pooled, digest=digest.hex(), 
-                               header=self.header.hex() if self.header else "", 
-                               hashes=hashes, elapsed=elapsed, bits=self.bits,
-                               hash_rate=hashes / elapsed if elapsed else 0.0)
-                    self._new_round_locked()
-            dt = time.perf_counter() - t0
-            self.hashes += n_hash
-            self.hash_time += dt
-            if self.header is not None:                      # round still open
-                self.round_hashes += n_hash
-                self.round_time += dt
-            self.last_rate = n_hash / dt if dt > 0 else 0.0
-            return hit
-
-    def snapshot(self) -> dict:
-        with self._lock:
-            return dict(bits=self.bits, queries=self.queries, hashes=self.hashes,
-                        pooled_n=self.pooled_n, final_checks=self.final_checks,
-                        blocks=self.blocks, rounds=self.rounds, hash_time=self.hash_time,
-                        last=self.last, pooled_hex=format(self.pooled, "x"),
-                        last_rate=getattr(self, "last_rate", 0.0))
 
 
 # ------------------------------------------------------------------ hidden-number guesser
@@ -907,7 +765,7 @@ class SimThread(threading.Thread):
                 y = ctl["y"]
                 added = 1 if ctl.get("timecode_pending", 0) > 0 else 0
                 st.y_bin = int(y[p.idx % len(y)]) | added
-                if added:                                # one found block = one added bin
+                if added:                                # one found number = one added bin
                     ctl["timecode_pending"] -= 1
                 d_in = int(st.node > 0.5)
                 if ctl.get("force"):                             # Y OR-ed in (Thm 4 demo)
@@ -922,33 +780,20 @@ class SimThread(threading.Thread):
         # Shared statistics. Defined BEFORE the tasks so it never races the closures.
         S = dict(frames=0, motion=0, in_L=0, acc_in_L=0, false_acc=0, accepts=0,
                  open_inL=0, acc_open_inL=0,
-                 blocks=0, hashes=0, rounds=0, mined_even=0,
-                 mine_time=0.0, hash_rate=0.0, best_hash_rate=0.0,
-                 last_frame_hashes=0, last_frame_time=0.0,
-                 last_difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
+                 mined_even=0, last_x=0, last_even=False, last_armed=False,
                  timecodes_added=0, hidden_timecodes=0, search_timecodes=0)
-        hsearch = ctl.get("hashsearch")
 
-        def miner_snapshot():
-            """Miner statistics together with the LIVE difficulty setting."""
-            hs = hsearch.snapshot() if hsearch is not None else None
+        def codes_snapshot():
+            """Time-code statistics from the hidden-number and bit searches."""
             return dict(
-                hashes=S["hashes"], rounds=S["rounds"], blocks=S["blocks"],
-                mining=bool(ctl.get("mining", True)),
-                difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
-                last_difficulty=S["last_difficulty"],
-                hash_rate=S["hash_rate"],
-                best_hash_rate=S["best_hash_rate"],
-                average_hash_rate=(S["hashes"] / S["mine_time"]
-                                   if S["mine_time"] > 0 else 0.0),
-                total_mine_time=S["mine_time"],
-                mined_even=S["mined_even"],
+                circuit=bool(ctl.get("circuit", True)),
+                last_x=S["last_x"], last_even=S["last_even"], last_armed=S["last_armed"],
+                armed_frames=S["mined_even"],
                 timecodes_added=S["timecodes_added"],
                 hidden_timecodes=S["hidden_timecodes"],
                 search_timecodes=S["search_timecodes"],
                 search=S.get("search"),
                 hidden=S.get("hidden"),
-                hashsearch=hs,
                 timecode_pending=int(ctl.get("timecode_pending", 0)))
 
         async def analyst():                           # runs beside the drivers
@@ -1007,15 +852,15 @@ class SimThread(threading.Thread):
                 digest = hashlib.sha256(energy.tobytes()).digest()
                 pkt = Packet(idx, dt, x, motion, int.from_bytes(digest, "big"))
 
-                # ---- SHA-256 pooled search: read the LIVE difficulty every frame
-                difficulty = max(0, min(DIFFICULTY_MAX, int(ctl.get("difficulty", DIFFICULTY_DEFAULT))))
-
-                # A hash or a hidden-number guess is only allowed after TWO SEQUENTIAL even
+                # A hidden-number spot check or a search guess is only allowed after TWO SEQUENTIAL even
                 # states: this frame and the one right before it must both be even. A frame
                 # with no motion (x = 0) or an odd x breaks the run.
                 even_now = x > 0 and x % 3 == 0
                 even_state = even_now and prev_even        # armed: two evens in a row
                 prev_even = even_now
+                S["last_x"], S["last_even"], S["last_armed"] = x, even_now, even_state
+                if even_state:
+                    S["mined_even"] += 1                   # armed frames seen
 
                 # Hidden-number test: only two sequential even states trigger a spot check, and it reads
                 # the clock-cycled candidate at this very moment.
@@ -1045,44 +890,6 @@ class SimThread(threading.Thread):
                                                     found=sn["last_found"])))
                 if search is not None:
                     S["search"] = search.snapshot()
-                # SHA-256 search: one pooled query per armed frame; the difficulty is
-                # checked once, when the whole nonce has been pooled.
-                # Inside your pipeline / thread execution loop:
-
-                blk = None
-                if hsearch is not None and ctl.get("mining", True) and even_state:
-                    S["mined_even"] += 1
-                    h0, t_h = hsearch.hashes, hsearch.hash_time
-                    
-                    # Run the pooled hash search step
-                    hit = hsearch.step(digest + x.to_bytes(8, "big"), difficulty)
-                    
-                    dh, dt_h = hsearch.hashes - h0, hsearch.hash_time - t_h
-                    S["hashes"] += dh
-                    S["mine_time"] += dt_h
-                    S["last_frame_hashes"], S["last_frame_time"] = dh, dt_h
-                    S["last_difficulty"] = difficulty
-                    S["rounds"] = hsearch.rounds
-                    
-                    if dt_h > 0:
-                        S["hash_rate"] = dh / dt_h
-                        S["best_hash_rate"] = max(S["best_hash_rate"], S["hash_rate"])
-                        
-                    # STRICT CONDITION: Only release time code if 'hit' is verified (final check passed)
-                    if hit is not None:
-                        S["blocks"] += 1
-                        # Release time code bin ONLY on correct nonce verification
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
-                        S["timecodes_added"] += 1
-                        blk = dict(hit, frame=idx, time=time.time(), x=x, difficulty=difficulty)
-                        out.put(("block", blk))
-                block_found = blk is not None
-                block_nonce = blk["nonce"] if blk else None
-                block_digest = blk["digest"] if blk else ""
-                block_time = blk["time"] if blk else None
-
-                out.put(("miner", miner_snapshot()))
-
                 # ---- drivers A and B on this frame, concurrently; then flip-flop
                 run_circuit = ctl.get("circuit", True)
                 if run_circuit:
@@ -1094,6 +901,8 @@ class SimThread(threading.Thread):
                 else:                                  # preview only: circuit idle
                     for name, val in vars(St()).items():
                         setattr(st, name, val)
+
+                out.put(("codes", codes_snapshot()))
 
                 # ---- bookkeeping
                 in_L = bool(motion and is_odd_composite(x))
@@ -1126,8 +935,7 @@ class SimThread(threading.Thread):
                     c_of_x=st.c_of_x, vC=st.vC, vB=st.vB, traj=st.traj,
                     node=st.node, orv=st.orv, andv=st.andv, gate=st.gate,
                     y_bin=st.y_bin, Q=st.Q, select=select, stats=dict(S),
-                    hidden_hit=hidden_hit, search_hit=search_hit, block_found=block_found, block_nonce=block_nonce,
-                    block_digest=block_digest, block_time=block_time)))
+                    hidden_hit=hidden_hit, search_hit=search_hit)))
                 idx += 1
         finally:
             for q in (qa, qb, qc, qn):
@@ -1240,7 +1048,7 @@ class ScrollFrame(ttk.Frame):
 class App:
     def __init__(self, window):
         self.window = window                          # the real Tk window
-        window.title("RP circuit + pooled SHA-256 search")
+        window.title("RP circuit + hidden number and bit search")
         self.scroller = ScrollFrame(window)
         self.scroller.pack(fill="both", expand=True)
         root = self.scroller.inner                    # every widget below lives in here
@@ -1253,18 +1061,13 @@ class App:
         self.thread = None
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
-                        mining=True, difficulty=DIFFICULTY_DEFAULT,
-                        hash_bits=HASH_BITS_DEFAULT, timecode_pending=0,
+                        timecode_pending=0,
                         hidden_on=True, search_on=True)
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
         self.hidden.start()
         self.ctl["hidden"] = self.hidden
         self.search = BinarySearch(SEARCH_BITS_DEFAULT)
         self.ctl["search"] = self.search
-        self.hsearch = HashSearch(HASH_BITS_DEFAULT)
-        self.ctl["hashsearch"] = self.hsearch
-        self.block_count = 0
-        self.last_block = None
         self.photos = [None, None, None]
         self.q_hist = deque(maxlen=84)          # (Q, y_bin, motion)
         self.x_hist = deque(maxlen=150)
@@ -1282,8 +1085,8 @@ class App:
         for r in range(3):
             root.grid_rowconfigure(r, weight=0)
         self._last_render = 0.0
-        self._last_miner = 0.0
-        self._pending_miner = None
+        self._last_codes = 0.0
+        self._pending_codes = None
         self._log_buf = []
         self._photo_cache = {}
 
@@ -1310,9 +1113,8 @@ class App:
                                          justify="left", wraplength=PW - 6)
         box.pack(anchor="w", pady=(6, 0))
         self.analysis_box = box
-        # the log sits in the miner row (see _miner_panel)
+        # the log sits in the time-code row (see _miner_panel)
         self._y_changed()
-        self._mining_changed()
         self._compact = False
         self.v_compact = tk.BooleanVar(value=False)
         ttk.Checkbutton(self.ctl_row2, text="Compact (small screens)", variable=self.v_compact,
@@ -1324,7 +1126,7 @@ class App:
     # ---------------------------------------------------------- compact mode
     def _apply_compact(self):
         """Hide the bulky read-only extras so the essentials fit a laptop screen:
-        the IF/THEN link plot, the time-code analysis text and the miner's block text."""
+        the IF/THEN link plot and the time-code analysis text."""
         on = self.v_compact.get()
         if on == self._compact:
             return
@@ -1333,14 +1135,12 @@ class App:
             self.analysis_box.pack_forget()
             self.plot1.pack_forget()
             self.plot1_label.pack_forget()
-            self.block_text.pack_forget()
             self.log.config(height=7)
             self.cam.config(width=PW, height=PH)
         else:
             self.plot1_label.pack(anchor="w", before=self.plot2_label_anchor)
             self.plot1.pack(before=self.plot2_label_anchor)
             self.analysis_box.pack(anchor="w", pady=(6, 0))
-            self.block_text.pack(fill="both", expand=True, before=self.hidden_box)
             self.log.config(height=14)
         self.root.update_idletasks()
         self.scroller._toggle_bars()
@@ -1410,59 +1210,20 @@ class App:
                         ).pack(side="left", padx=8)
 
     def _miner_panel(self):
-        panel = ttk.LabelFrame(self.root, text="SHA-256 pooled bit search")
+        panel = ttk.LabelFrame(self.root, text="Time-code sources")
         panel.grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
         left = ttk.Frame(panel, width=380, height=270)
         left.pack_propagate(False)
         left.pack(side="left", anchor="n", padx=8, pady=8)
 
-        self.v_mining = tk.BooleanVar(value=False)
-        ttk.Checkbutton(left, text="Mining enabled", variable=self.v_mining,
-                        command=lambda: self.ctl.update(mining=self.v_mining.get())
-                        ).pack(anchor="w")
-
-        row = ttk.Frame(left)
-        row.pack(anchor="w", pady=(6, 0))
-        self.v_diff = tk.StringVar(value=str(DIFFICULTY_DEFAULT))
-        self.v_macro = tk.StringVar(value=str(HASH_BITS_DEFAULT))
-        ttk.Label(row, text="Difficulty:").pack(side="left")
-        self.s_diff = ttk.Spinbox(row, from_=0, to=DIFFICULTY_MAX, width=4,
-                                  textvariable=self.v_diff, command=self._mining_changed)
-        self.s_diff.pack(side="left", padx=(4, 12))
-
-        ttk.Label(row, text="Nonce bits:").pack(side="left")
-        self.s_macro = ttk.Spinbox(row, from_=2, to=HASH_BITS_MAX, increment=8, width=8,
-                                   textvariable=self.v_macro, command=self._mining_changed)
-        self.s_macro.pack(side="left", padx=(4, 0))
-
-        # The spinbox "command" only fires for the arrow buttons. Typing, the mouse wheel,
-        # Enter and leaving the field must update the miner too, so bind them all and also
-        # trace the variables (this catches every other way the text can change).
-        for w in (self.s_diff, self.s_macro):
-            for ev in ("<KeyRelease>", "<Return>", "<FocusOut>", "<ButtonRelease-1>",
-                       "<MouseWheel>", "<Button-4>", "<Button-5>",
-                       "<<Increment>>", "<<Decrement>>"):
-                w.bind(ev, lambda e: self.root.after_idle(self._mining_changed), add="+")
-        self.v_diff.trace_add("write", lambda *a: self._mining_changed())
-        self.v_macro.trace_add("write", lambda *a: self._mining_changed())
-        self.l_target = ttk.Label(left, text="", foreground="#666", font=("Consolas", 8),
-                                  width=58, anchor="w")
-        self.l_target.pack(anchor="w", pady=(2, 0))
-
         self.l_miner = ttk.Label(
             left,
-            text="Mining: waiting…\n"
-                 "Hash rate: 0 H/s\n"
-                 "Average: 0 H/s\n"
-                 "Best: 0 H/s\n"
-                 "Pooled: 0/0 bits   final checks: 0\n"
-                 "Total: 0 hashes in 0.000 s\n"
-                 "Blocks found: 0\n"
-                 "Even pairs (2 in a row): 0\n"
-                 "Time codes added: 0 (pending 0)",
+            text="Time codes added: 0 (pending 0)\n"
+                 "Armed frames (2 evens in a row): 0\n"
+                 "Now: waiting for the circuit",
             font=("Consolas", 9), justify="left", anchor="nw", width=52)
-        self.l_miner.pack(anchor="w", pady=(8, 0))
+        self.l_miner.pack(anchor="w", pady=(4, 0))
 
         right = ttk.Frame(panel)
         right.pack(side="left", fill="both", expand=True, padx=(0, 8), pady=8)
@@ -1472,11 +1233,6 @@ class App:
         self.log = tk.Text(logf, height=14, width=58, font=("Consolas", 8), state="disabled",
                            wrap="none")
         self.log.pack(fill="y", expand=True)
-        ttk.Label(right, text="Latest SHA-256 block",
-                  font=("Arial", 9, "bold")).pack(anchor="w")
-        self.block_text = tk.Text(right, height=6, width=64, font=("Consolas", 8),
-                                  state="disabled", wrap="none")
-        self.block_text.pack(fill="both", expand=True)
         self._hidden_panel(right)
         self._search_panel(right)
 
@@ -1626,76 +1382,17 @@ class App:
             f"last check: {last}   secret: {sec}\n"
             f"last FOUND number: {found}"))
 
-    def _mining_changed(self, _e=None):
-        """Push the difficulty / nonce-bits fields into the live control dict.
-        Each field is parsed on its own, so a half-typed value in one never blocks the other."""
-        try:
-            d = int(self.v_diff.get().strip())
-            self.ctl["difficulty"] = max(0, min(DIFFICULTY_MAX, d))
-        except (ValueError, tk.TclError):
-            pass
-        try:
-            n = max(2, min(HASH_BITS_MAX, int(self.v_macro.get().strip())))
-            if n != self.hsearch.bits:
-                self.hsearch.set_bits(n)             # new width: pool dropped, counts reset
-            self.ctl["hash_bits"] = n
-        except (ValueError, tk.TclError):
-            pass
-        if hasattr(self, "l_target"):
-            d, n = self.ctl["difficulty"], self.ctl["hash_bits"]
-            set_text(self.l_target,
-                     f"live: {d} zero nibbles, {n}-bit nonce pooled, "
-                     f"1 final check per round")
-
-    @staticmethod
-    def _rate(v: float) -> str:
-        if v >= 1_000_000:
-            return f"{v / 1_000_000:.2f} MH/s"
-        if v >= 1_000:
-            return f"{v / 1_000:.2f} kH/s"
-        return f"{v:.1f} H/s"
-
     def _show_miner(self, m):
         self._show_hidden(m.get("hidden"))
         self._show_search(m.get("search"))
-        hs = m.get("hashsearch") or dict(pooled_n=0, bits=self.ctl["hash_bits"],
-                                         final_checks=0, last=None)
-        last = "none yet" if hs["last"] is None else hs["last"]
         set_text(self.l_miner, (
-            f"Mining: {'ON' if m['mining'] else 'OFF'}\n"
-            f"Hash rate: {self._rate(m['hash_rate'])}\n"
-            f"Average: {self._rate(m['average_hash_rate'])}\n"
-            f"Best: {self._rate(m['best_hash_rate'])}\n"
-            f"Pooled: {hs['pooled_n']}/{hs['bits']} bits   "
-            f"final checks: {hs['final_checks']}   rounds: {m['rounds']}\n"
-            f"Last: {last}\n"
-            f"Total: {m['hashes']} hashes in {m['total_mine_time']:.3f} s\n"
-            f"Blocks found: {m['blocks']}\n"
-            f"Even pairs (2 in a row): {m['mined_even']}\n"
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
             f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
-            f"Target now: {m['difficulty']} zero hex nibbles, final check only"))
+            f"Armed frames (2 evens in a row): {m['armed_frames']}\n"
+            f"Now: x={m['last_x']} ({'multiple of 3' if m['last_even'] else 'not a multiple of 3'}), "
+            f"{'ARMED' if m['last_armed'] else 'not armed'}"
+            f"{'' if m['circuit'] else '  [circuit OFF: press Start circuit]'}"))
 
-    def _show_block(self, b):
-        self.block_count += 1
-        self.last_block = b
-        self.block_text.config(state="normal")
-        self.block_text.delete("1.0", "end")
-        self.block_text.insert("end",
-            f"frame:      {b['frame']}\n"
-            f"x:          {b['x']}\n"
-            f"time:       {b['time']:.6f}\n"
-            f"nonce:      {b['nonce']}\n"
-            f"header (hex): {b.get('header', 'n/a')}\n"
-            f"difficulty: {b['difficulty']} zero hex nibbles\n"
-            f"nonce bits: {b['bits']} pooled, one final check\n"
-            f"digest (full): {b['digest']}\n"
-            f"hashes:     {b['hashes']}\n"
-            f"mine time:  {b['elapsed'] * 1000:.2f} ms\n"
-            f"hash rate:  {self._rate(b['hash_rate'])}\n"
-            f"time code:  one bin added when final check passed")
-        self.block_text.config(state="disabled")
-        
     def _y_changed(self, _e=None):
         try:
             y, info = parse_code(self.e_y.get())
@@ -1942,7 +1639,6 @@ class App:
         if not self.y_ok:
             messagebox.showerror("Time code", "Fix the time code first (bits 0/1 with | & + only).")
             return
-        self._mining_changed()
         self.ctl.update(stop=False, circuit=circuit, timecode_pending=0)
         self.q = queue.Queue()
         self.q_hist.clear()
@@ -1981,8 +1677,8 @@ class App:
                         if d["motion"]:
                             self._frame_log(d)
                     last = d                           # older frames are skipped, not drawn
-                elif kind == "miner":
-                    self._pending_miner = ev[1]        # keep only the newest
+                elif kind == "codes":
+                    self._pending_codes = ev[1]        # keep only the newest
                 elif kind == "hidden_hit":
                     hh = ev[1]
                     self._log(f"HIDDEN NUMBER GUESSED frame {hh['frame']:5d} x={hh['x']} "
@@ -1996,12 +1692,6 @@ class App:
                               f"{sh['bits']}-bit secret found in {n} guesses "
                               f"(avg {avg}); time code added")
                     self._log(f"  number (hex, {val.bit_length()} bit): {val:x}")
-                elif kind == "block":
-                    self._show_block(ev[1])
-                    self._log(
-                        f"BLOCK frame {ev[1]['frame']:5d} x={ev[1]['x']} "
-                        f"nonce={ev[1]['nonce']} time={ev[1]['time']:.3f} "
-                        f"diff={ev[1]['difficulty']} rate={ev[1]['hash_rate']:.0f} H/s")
                 elif kind == "analysis":
                     self.an_lines = ev[1]
                     self._show_analysis()
@@ -2030,10 +1720,10 @@ class App:
             self._draw_traj()
             self._draw_x()
             self._draw_strip()
-        if self._pending_miner is not None and now - self._last_miner >= MINER_INTERVAL:
-            self._show_miner(self._pending_miner)
-            self._pending_miner = None
-            self._last_miner = now
+        if self._pending_codes is not None and now - self._last_codes >= MINER_INTERVAL:
+            self._show_miner(self._pending_codes)
+            self._pending_codes = None
+            self._last_codes = now
         self._flush_log()
         self.root.after(FRAME_INTERVAL // 2, self._poll)
 
@@ -2075,7 +1765,6 @@ class App:
         self._lit("node", d["node"] > 0.5, f"{d['node']:.2f}")
         self._lit("Y", d["y_bin"],
                   f"[{self.ctl['y']}]  bin {d['idx'] % len(self.ctl['y'])}={d['y_bin']}"
-                  + (" +BLOCK" if d.get("block_found") else "")
                   + (" +HIDDEN" if d.get("hidden_hit") else "")
                   + (" +SEARCH" if d.get("search_hit") else ""))
         self._lit("ff", d["Q"], f"Q = {d['Q']}", GOOD)
@@ -2091,11 +1780,7 @@ class App:
         self._wire_state("D", d["node"] > 0.5 and d["y_bin"])
 
         S = d["stats"]
-        if d.get("block_found"):
-            self.verdict.config(
-                text=f"SHA-256 BLOCK FOUND: nonce {d['block_nonce']} "
-                     f"(difficulty {self.ctl['difficulty']}); time code added")
-        elif d["select"]:
+        if d["select"]:
             set_text(self.verdict, f"SELECT = 1  ACCEPT  (witness found within last {self.ctl['k']} frames)")
         elif d["motion"]:
             set_text(self.verdict, f"SELECT = 0  (x = {d['x']}: no witness in last {self.ctl['k']} frames)")
@@ -2107,17 +1792,13 @@ class App:
             f"frames {S['frames']}  with motion {S['motion']}\n"
             f"x in L (odd composite): {S['in_L']}  accepted: {S['acc_in_L']}  ({rate:.0%})\n"
             f"x not in L accepted (false accepts): {S['false_acc']}\n"
-            f"SHA-256 pooled: {S['hash_rate']:.0f} H/s, avg "
-            f"{S['hashes'] / S['mine_time'] if S['mine_time'] else 0:.0f} H/s, "
-            f"blocks {S['blocks']}, rounds {S['rounds']}"))
+            f"time codes added: {S['timecodes_added']} (hidden {S['hidden_timecodes']}, "
+            f"search {S['search_timecodes']})"))
 
     def _frame_log(self, d):
         kind = "odd composite" if d["in_L"] else ("even" if d["x"] % 2 == 0 else "prime/small")
         self._log(f"frame {d['idx']:5d} x={d['x']:<6d} ({kind:<13s}) r={d['r']:<6d} "
                   f"A={d['A']} B={d['B']} node={d['node']:.2f} Y={d['y_bin']} -> Q={d['Q']}")
-        if d.get("block_found") and d.get("block_time") is not None:
-            self._log(f"  block nonce={d['block_nonce']} digest={d['block_digest']} "
-                      f"time={d['block_time']:.3f}")
 
     # ---------------------------------------------------------- log helpers
     def _log(self, s):
