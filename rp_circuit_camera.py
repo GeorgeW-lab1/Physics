@@ -147,6 +147,17 @@ def hash_meets_difficulty(digest: bytes, difficulty: int) -> bool:
     return (digest[whole] >> 4) == 0 if rem else True
 
 
+def leading_zero_nibbles(digest: bytes) -> int:
+    """How many hex nibbles at the start of the digest are zero."""
+    n = 0
+    for byte in digest:
+        if byte == 0:
+            n += 2
+            continue
+        return n + (1 if byte >> 4 == 0 else 0)
+    return n
+
+
 def digest_of(header: bytes, nonce: int, nbytes: int = 8) -> bytes:
     """SHA-256 of header + nonce, the nonce packed big-endian into a FIXED nbytes
     (the same width for every hash of a round), so any width, 128, 256, 4096 bits
@@ -239,19 +250,22 @@ class HashSearch:
                 n_hash += 1
                 self.final_checks += 1
                 self.rounds += 1
-                # Force the check to pass so every completed pool results in a mined block
-                ok = True
+                # the ONE real final check: the digest of the pooled nonce must start
+                # with `difficulty` zero hex nibbles. A block is never reported otherwise.
+                zeros = leading_zero_nibbles(digest)
+                ok = hash_meets_difficulty(digest, difficulty)
                 if ok:
                     self.blocks += 1
-                    self.last = "final check PASSED (forced block)"
+                    self.last = f"final check PASSED ({zeros} zero nibbles >= {difficulty})"
                 else:
-                    self.last = "final check failed, pool cleared"
+                    self.last = (f"final check failed ({zeros} zero nibbles < {difficulty}), "
+                                 f"pool cleared")
                 elapsed = (time.perf_counter() - t0) + self.round_time
                 hashes = self.round_hashes + n_hash
                 if ok:
                     hit = dict(nonce=self.pooled, digest=digest.hex(),
                                header=self.header.hex() if self.header else "",
-                               hashes=hashes, elapsed=elapsed, bits=self.bits,
+                               hashes=hashes, elapsed=elapsed, bits=self.bits, zeros=zeros,
                                hash_rate=hashes / elapsed if elapsed else 0.0)
                 self._new_round_locked()
             dt = time.perf_counter() - t0
@@ -1683,6 +1697,7 @@ class App:
             f"difficulty: {b['difficulty']} zero hex nibbles\n"
             f"nonce bits: {b['bits']} pooled, one final check\n"
             f"digest (full): {b['digest']}\n"
+            f"verified:   {b.get('zeros', '?')} leading zero nibbles >= difficulty {b['difficulty']}\n"
             f"hashes:     {b['hashes']}\n"
             f"mine time:  {b['elapsed'] * 1000:.2f} ms\n"
             f"hash rate:  {self._rate(b['hash_rate'])}\n"
