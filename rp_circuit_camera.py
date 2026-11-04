@@ -52,10 +52,10 @@ its own asyncio loop and talks to Tk through a queue.Queue.
 
 Hidden-number test (separate from the SHA-256 miner): a secret integer is drawn in
 0..range-1. A separate clock thread cycles a candidate through that range at a frequency
-that wanders randomly (20 Hz to 2 kHz, re-drawn every 0.3 s). The thread never sees the
+that you set in the GUI (1 Hz to 2 kHz, default 17 Hz). The thread never sees the
 secret. Only when an EVEN state arrives does the frame loop spot-check the candidate AT
 THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a mined
-macroblock) and a new secret is hidden. Expected hits = checks / range.
+macroblock). After EVERY spot check, hit or miss, a new secret is hidden. Expected hits = checks / range.
 "New secret" (and changing the range) draws a fresh secret and zeroes the spot checks,
 hits and luck factor. The luck factor is hits / expected hits in percent (100% = average),
 shown with P(>= hits by chance), the binomial tail probability.
@@ -151,7 +151,9 @@ def mine_macroblock(header: bytes, start_nonce: int, size: int, difficulty: int)
 HIDDEN_RANGE_DEFAULT = 100
 HIDDEN_RANGE_MAX = 1_000_000
 GUESS_HZ_MIN, GUESS_HZ_MAX = 20.0, 2000.0     # the clock wanders between these
-GUESS_RETUNE_S = 0.3                          # how often a new frequency is drawn # changed to static frequency
+GUESS_RETUNE_S = 0.3                          # how often the clock re-reads the frequency setting
+GUESS_HZ_DEFAULT = 17.0                       # starting clock frequency (adjustable in the GUI)
+GUESS_HZ_LIMITS = (1.0, 2000.0)               # allowed range for the frequency box
 
 
 def prob_at_least(hits: int, n: int, p: float) -> float:
@@ -182,7 +184,9 @@ class HiddenNumber:
         self._stop = threading.Event()
         self.size = 1
         self.candidate = 0
-        self.hz = GUESS_HZ_MIN
+        self.hz = GUESS_HZ_DEFAULT
+        self.target_hz = GUESS_HZ_DEFAULT
+        self._wake = threading.Event()      # interrupts the clock's wait on a change
         self.ticks = 0
         self.checks = 0
         self.hits = 0
@@ -200,6 +204,15 @@ class HiddenNumber:
 
     def stop(self):
         self._stop.set()
+        self._wake.set()
+
+    def set_hz(self, hz: float):
+        """Change the clock frequency (takes effect immediately)."""
+        lo, hi = GUESS_HZ_LIMITS
+        hz = max(lo, min(hi, float(hz)))
+        with self._lock:
+            self.target_hz = hz
+        self._wake.set()
 
     def _reset_counts_locked(self):
         """Zero the statistics (caller holds the lock)."""
@@ -233,25 +246,25 @@ class HiddenNumber:
 
     # ---- the separate clock thread: cycles the candidate, frequency varies
     def _run(self):
-        next_retune = 0.0
-        period = 1.0 / GUESS_HZ_MIN
+        hz = self.target_hz
+        period = 1.0 / hz
         nxt = time.perf_counter()
         while not self._stop.is_set():
-            now = time.perf_counter()
-            if now >= next_retune:
-                # log-uniform frequency, so slow and fast regimes are equally likely
-                hz = 32
-                period = 1.0 / hz
-                next_retune = now + GUESS_RETUNE_S
-                with self._lock:
-                    self.hz = hz
             with self._lock:
+                new_hz = self.target_hz
+            if new_hz != hz:                       # frequency was changed from the GUI
+                hz = new_hz
+                period = 1.0 / hz
+                nxt = time.perf_counter()
+            with self._lock:
+                self.hz = hz
                 self.candidate = (self.candidate + 1) % self.size
                 self.ticks += 1
             nxt += period
             delay = nxt - time.perf_counter()
             if delay > 0:
-                self._stop.wait(delay)
+                self._wake.wait(delay)             # wakes early on stop or frequency change
+                self._wake.clear()
             elif delay < -0.05:                    # fell behind: do not burst to catch up
                 nxt = time.perf_counter()
 
@@ -265,8 +278,9 @@ class HiddenNumber:
             if hit:
                 self.hits += 1
                 self.rounds += 1
-                self._secret = int(self._rng.integers(0, self.size))   # hide a new number
-                self.revealed = False
+            # hit or miss, the number is thrown away and a new one is hidden after every check
+            self._secret = int(self._rng.integers(0, self.size))
+            self.revealed = False
             return hit
 
     def snapshot(self) -> dict:
@@ -694,7 +708,7 @@ class SimThread(threading.Thread):
                 hashes=S["hashes"], macroblocks=S["macroblocks"],
                 skipped=S["skipped_macroblocks_total"], blocks=S["blocks"],
                 dropped=S["skipped_macroblocks"],
-                mining=bool(ctl.get("mining", False)),
+                mining=bool(ctl.get("mining", True)),
                 difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
                 macroblock_size=int(ctl.get("macroblock", MACROBLOCK_DEFAULT)),
                 last_difficulty=S["last_difficulty"],
@@ -834,7 +848,7 @@ class SimThread(threading.Thread):
                                                     snap=hidden.snapshot())))
                 if hidden is not None:
                     S["hidden"] = hidden.snapshot()
-                if ctl.get("mining", False):
+                if ctl.get("mining", True):
                     if even_state:
                         S["mined_even"] += 1
                         if miner_q.full():
@@ -1032,7 +1046,7 @@ class App:
         self.thread = None
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
-                        mining=False, difficulty=DIFFICULTY_DEFAULT,
+                        mining=True, difficulty=DIFFICULTY_DEFAULT,
                         macroblock=MACROBLOCK_DEFAULT, timecode_pending=0,
                         hidden_on=True)
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
@@ -1277,6 +1291,14 @@ class App:
         ttk.Button(row, text="New secret",
                    command=self._hidden_new_secret).pack(side="left", padx=(12, 2))
         ttk.Button(row, text="Reveal", command=self._hidden_reveal).pack(side="left", padx=2)
+        ttk.Label(row, text="Freq Hz").pack(side="left", padx=(12, 2))
+        self.v_hhz = tk.StringVar(value=f"{GUESS_HZ_DEFAULT:g}")
+        self.s_hhz = ttk.Spinbox(row, from_=GUESS_HZ_LIMITS[0], to=GUESS_HZ_LIMITS[1],
+                                 increment=1, width=7, textvariable=self.v_hhz,
+                                 command=self._hidden_hz_changed)
+        self.s_hhz.pack(side="left")
+        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
+            self.s_hhz.bind(ev, lambda e: self.root.after_idle(self._hidden_hz_changed), add="+")
         hbox, self.l_hidden = fixed_label(box, 480, 78, text="", font=("Consolas", 9),
                                           justify="left", wraplength=480)
         hbox.pack(anchor="w", padx=6, pady=(2, 4))
@@ -1292,6 +1314,17 @@ class App:
             self.hidden.set_range(n)
             self._show_hidden(self.hidden.snapshot())
             self._log(f"# hidden number: range 0..{n - 1}, new secret drawn, counts reset")
+
+    def _hidden_hz_changed(self, _e=None):
+        try:
+            hz = float(self.v_hhz.get().strip())
+        except (ValueError, tk.TclError):
+            return
+        lo, hi = GUESS_HZ_LIMITS
+        hz = max(lo, min(hi, hz))
+        if hz != self.hidden.target_hz:
+            self.hidden.set_hz(hz)
+            self._log(f"# hidden number: clock frequency set to {hz:g} Hz")
 
     def _hidden_new_secret(self):
         self.hidden.new_secret()
@@ -1314,7 +1347,7 @@ class App:
             luck = (f"luck factor: {h['luck']:.0f}%  (100% = average)   "
                     f"P(>= {h['hits']} hits by chance) = {h['luck_tail']:.1%}")
         set_text(self.l_hidden, (
-            f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (varying)\n"
+            f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (set)\n"
             f"spot checks: {h['checks']}   hits: {h['hits']}   expected ~{h['expected']:.2f}\n"
             f"{luck}\n"
             f"last check: {last}   secret: {sec}"))
