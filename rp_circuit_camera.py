@@ -1123,7 +1123,7 @@ class App:
                           command=lambda v, key=key: (self.ctl.update({key: int(float(v))}),
                                                       self._refresh_analysis()))
             s.pack(side="left", padx=(2, 10))
-        scale("pixel diff >", "thr", 4, 60, 18)
+        scale("pixel diff >", "thr", 4, 60, 4)
         scale("min moving px", "min_px", 5, 800, 30)
         scale("k frames", "k", 1, 30, 5)
 
