@@ -54,10 +54,11 @@ Two sequential even states: a hash is mined, and the hidden number is guessed, o
 frame whose x is even AND whose previous frame's x was also even. An odd x or a no-motion
 frame in between breaks the run, so the next even frame only starts a new one.
 
-Higher/lower search (separate from both): a secret of N bits (default 1000) and an oracle
-that answers equal / too low / too high. On every armed frame (two sequential evens) one
-guess is made at the midpoint of what is still possible, halving the interval, so a
-1000-bit secret falls in about 1000 guesses instead of about 2^1000. A found secret earns
+Higher/lower search (separate from both): a secret of N bits (default 1000) and a
+higher/lower oracle. On every armed frame (two sequential evens) one query yields one bit
+of the secret, which is POOLED; no equality check is made per query. Only when all N bits
+are pooled is the candidate compared with the secret, once. A 1000-bit secret falls in
+1000 pooled queries plus 1 final check instead of about 2^1000 blind guesses. A found secret earns
 one time-code bin and a new secret is hidden.
 
 Hidden-number test (separate from the SHA-256 miner): a secret integer is drawn in
@@ -159,40 +160,58 @@ def mine_macroblock(header: bytes, start_nonce: int, size: int, difficulty: int)
     return False, None, "", size, time.perf_counter() - t0
 
 
+def digest_of(header: bytes, nonce: int) -> bytes:
+    return hashlib.sha256(header + nonce.to_bytes(8, "big")).digest()
+
+
 def mine_macroblock_tree(header: bytes, start_nonce: int, size: int, difficulty: int,
                          progress=None):
-    """Search nonces [start_nonce, start_nonce + size) using a binary-tree traversal.
+    """Pooled binary-tree search over nonces [start_nonce, start_nonce + size).
+
+    Same method as BinarySearch: one bit per query, bits pooled, ONE final check.
+
+      * The nonce offset is built most significant bit first. For each bit the
+        two children of the tree node are hashed, sha256(header + nonce), and
+        the comparison "which digest is smaller (more leading zeros)" is the
+        oracle answer. That answer is one bit and goes into the pool. No
+        difficulty check is made on these queries.
+      * Only when every bit is pooled is the pooled nonce hashed once more and
+        checked against the difficulty. That is the single final check.
+
+    SHA-256 gives no real higher/lower signal, so the pooled candidate is not
+    steered toward a hit the way the integer search is steered to its secret:
+    one candidate (about 2*bits + 1 hashes) is tried per macroblock.
 
     Returns (found, nonce, digest_hex, hashes_done, elapsed_seconds).
-
-    `progress(nonce, hashes_done)` is called every 128 hashes so the GUI can show
-    the live nonce and hash count.
+    `progress(nonce, hashes_done)` is called every 128 hashes and at the end of
+    the pooling stage.
     """
     t0 = time.perf_counter()
     hashes_done = 0
-    stack = [(start_nonce, start_nonce + size - 1)]
+    nbits = max(1, (size - 1).bit_length())
+    pooled = 0                                   # offset bits collected, MSB first
 
-    while stack:
-        lo, hi = stack.pop()
-        if lo > hi:
-            continue
+    for i in range(nbits):
+        shift = nbits - 1 - i
+        trial = pooled | (1 << shift)
+        if trial > size - 1:                     # right child is outside the macroblock
+            continue                             # bit is forced to 0, no query needed
+        d0 = digest_of(header, start_nonce + pooled)         # child with bit = 0
+        d1 = digest_of(header, start_nonce + trial)          # child with bit = 1
+        hashes_done += 2
+        if d1 < d0:                              # oracle answer: one bit, pooled
+            pooled = trial
+        if progress is not None and hashes_done % 128 < 2:
+            progress(start_nonce + pooled, hashes_done)
 
-        mid = (lo + hi) // 2
-        digest = hashlib.sha256(header + mid.to_bytes(8, "big")).digest()
-        hashes_done += 1
-
-        if progress is not None and hashes_done % 128 == 0:
-            progress(mid, hashes_done)
-
-        if hash_meets_difficulty(digest, difficulty):
-            return True, mid, digest.hex(), hashes_done, time.perf_counter() - t0
-
-        # SHA-256 gives no direction, so both halves remain possible.
-        if mid + 1 <= hi:
-            stack.append((mid + 1, hi))
-        if lo <= mid - 1:
-            stack.append((lo, mid - 1))
-
+    # pool is full: the ONE final check
+    nonce = start_nonce + pooled
+    digest = digest_of(header, nonce)
+    hashes_done += 1
+    if progress is not None:
+        progress(nonce, hashes_done)
+    if hash_meets_difficulty(digest, difficulty):
+        return True, nonce, digest.hex(), hashes_done, time.perf_counter() - t0
     return False, None, "", hashes_done, time.perf_counter() - t0
 
 
@@ -360,21 +379,25 @@ def short_int(n: int, keep: int = 20) -> str:
 
 
 class BinarySearch:
-    """A secret integer of `bits` bits and a higher/lower oracle.
+    """A secret integer of `bits` bits and a higher/lower oracle, with POOLED bits.
 
-    Each guess() takes the midpoint of the interval still possible, asks the oracle
-    (equal / too low / too high) and throws away half the interval. A secret of n bits
-    is therefore found in at most about n+1 guesses (a decision tree of depth n),
-    where blind equality-only guessing would need about 2^n. When the secret is found
-    one time-code bin is earned and a new secret is hidden."""
+    Each guess() is one oracle query and yields exactly one bit of the secret
+    (most significant bit first): "is secret >= pooled-so-far with this bit set?".
+    The bit is added to a pool and NO equality check is made on that query. Only
+    when all `bits` bits have been pooled is the pooled candidate compared with the
+    secret, once. A secret of n bits therefore costs n pooled queries plus one
+    final check, instead of an independent equality check after every guess.
+    When the final check passes one time-code bin is earned and a new secret is
+    hidden."""
 
     def __init__(self, bits=SEARCH_BITS_DEFAULT):
         self._lock = threading.Lock()
         self.bits = 2
-        self.guesses = 0                    # all guesses since the last reset
+        self.guesses = 0                    # all oracle queries since the last reset
+        self.final_checks = 0               # equality checks made (one per full pool)
         self.solves = 0                     # secrets found since the last reset
-        self.solved_guesses = 0             # guesses spent on the solved secrets
-        self.round_guesses = 0              # guesses spent on the current secret
+        self.solved_guesses = 0             # queries spent on the solved secrets
+        self.round_guesses = 0              # queries spent on the current secret
         self.last = None                    # (verdict, guess_bits)
         self.last_found = None              # (number, guesses it took) of the latest find
         self.revealed = False
@@ -382,12 +405,13 @@ class BinarySearch:
 
     def _new_round_locked(self):
         self._secret = secrets.randbelow(1 << self.bits)
-        self.lo, self.hi = 0, (1 << self.bits) - 1
+        self.pooled = 0                     # bits collected so far, MSB first
+        self.pooled_n = 0                   # how many bits are in the pool
         self.round_guesses = 0
         self.revealed = False
 
     def _reset_counts_locked(self):
-        self.guesses = self.solves = self.solved_guesses = 0
+        self.guesses = self.solves = self.solved_guesses = self.final_checks = 0
         self.last = None
         self.last_found = None
 
@@ -409,32 +433,40 @@ class BinarySearch:
             return self._secret
 
     def guess(self) -> bool:
-        """One oracle query at the midpoint. True when this guess found the secret."""
+        """One oracle query. Pools one bit; only the query that completes the pool
+        runs the single final equality check. True when that check finds the secret."""
         with self._lock:
-            mid = (self.lo + self.hi) // 2
             self.guesses += 1
             self.round_guesses += 1
-            if mid == self._secret:
-                assert mid == self._secret                      # the found value IS the secret
+            shift = self.bits - 1 - self.pooled_n
+            trial = self.pooled | (1 << shift)
+            bit = 1 if self._secret >= trial else 0      # oracle: higher/lower, no equality
+            self.pooled |= bit << shift
+            self.pooled_n += 1
+            if self.pooled_n < self.bits:
+                self.last = (f"pooled bit {self.pooled_n}/{self.bits} = {bit}", self.pooled_n)
+                return False
+
+            # pool is full: the ONE final check
+            self.final_checks += 1
+            if self.pooled == self._secret:
                 self.solves += 1
                 self.solved_guesses += self.round_guesses
-                self.last_found = (mid, self.round_guesses)
-                self.last = ("FOUND", mid.bit_length())
+                self.last_found = (self.pooled, self.round_guesses)
+                self.last = ("FOUND (final check passed)", self.bits)
                 self._new_round_locked()
                 return True
-            if mid < self._secret:
-                self.lo = mid + 1
-                self.last = ("too low, go higher", mid.bit_length())
-            else:
-                self.hi = mid - 1
-                self.last = ("too high, go lower", mid.bit_length())
+            self.last = ("final check failed, pool cleared", self.bits)
+            self.pooled = 0
+            self.pooled_n = 0
             return False
 
     def snapshot(self) -> dict:
         with self._lock:
             return dict(bits=self.bits, guesses=self.guesses, solves=self.solves,
                         round_guesses=self.round_guesses,
-                        interval_bits=(self.hi - self.lo).bit_length(),
+                        pooled_n=self.pooled_n, final_checks=self.final_checks,
+                        interval_bits=self.bits - self.pooled_n,
                         avg=(self.solved_guesses / self.solves if self.solves else None),
                         last=self.last, last_found=self.last_found,
                         secret=short_int(self._secret) if self.revealed else None)
@@ -1544,7 +1576,7 @@ class App:
             f"secret: {h['bits']} bits   blind guessing would need ~2^{h['bits']} tries\n"
             f"guesses: {h['guesses']} total, {h['round_guesses']} on this secret   "
             f"found: {h['solves']}   avg guesses/found: {avg}\n"
-            f"still possible: {h['interval_bits']} bits   last: {last}\n"
+            f"pooled: {h['pooled_n']}/{h['bits']} bits   final checks: {h['final_checks']}   last: {last}\n"
             f"last FOUND number: {found}\n"
             f"current secret: {sec}"))
 
