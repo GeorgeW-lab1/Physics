@@ -50,10 +50,20 @@ process each frame concurrently as asyncio tasks; the flip-flop stage runs
 once both are finished. The whole pipeline lives in a background thread with
 its own asyncio loop and talks to Tk through a queue.Queue.
 
+Two sequential even states: a hash is mined, and the hidden number is guessed, only on a
+frame whose x is even AND whose previous frame's x was also even. An odd x or a no-motion
+frame in between breaks the run, so the next even frame only starts a new one.
+
+Higher/lower search (separate from both): a secret of N bits (default 1000) and an oracle
+that answers equal / too low / too high. On every armed frame (two sequential evens) one
+guess is made at the midpoint of what is still possible, halving the interval, so a
+1000-bit secret falls in about 1000 guesses instead of about 2^1000. A found secret earns
+one time-code bin and a new secret is hidden.
+
 Hidden-number test (separate from the SHA-256 miner): a secret integer is drawn in
 0..range-1. A separate clock thread cycles a candidate through that range at a frequency
 that you set in the GUI (1 Hz to 2 kHz, default 17 Hz). The thread never sees the
-secret. Only when an EVEN state arrives does the frame loop spot-check the candidate AT
+secret. Only when two sequential EVEN states have arrived does the frame loop spot-check the candidate AT
 THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a mined
 macroblock). After EVERY spot check, hit or miss, a new secret is hidden. Expected hits = checks / range.
 "New secret" (and changing the range) draws a fresh secret and zeroes the spot checks,
@@ -67,6 +77,7 @@ import asyncio
 import hashlib
 import math
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -192,6 +203,7 @@ class HiddenNumber:
         self.hits = 0
         self.rounds = 0                     # how many secrets have been guessed so far
         self.last_check = None              # (candidate, hit)
+        self.last_found = None              # (number, checks it took) of the latest hit
         self._secret = 0
         self.revealed = False
         self.set_range(size)
@@ -220,6 +232,7 @@ class HiddenNumber:
         self.hits = 0
         self.rounds = 0
         self.last_check = None
+        self.last_found = None
 
     def set_range(self, size: int):
         """Change the range, draw a fresh secret and restart the counts."""
@@ -278,6 +291,7 @@ class HiddenNumber:
             if hit:
                 self.hits += 1
                 self.rounds += 1
+                self.last_found = (cand, self.checks)   # the correct number, as hidden
             # hit or miss, the number is thrown away and a new one is hidden after every check
             self._secret = int(self._rng.integers(0, self.size))
             self.revealed = False
@@ -292,8 +306,100 @@ class HiddenNumber:
             return dict(size=self.size, candidate=self.candidate, hz=self.hz,
                         ticks=self.ticks, checks=self.checks, hits=self.hits,
                         rounds=self.rounds, last_check=self.last_check,
-                        expected=expected, luck=luck, luck_tail=tail,
+                        last_found=self.last_found, expected=expected, luck=luck, luck_tail=tail,
                         secret=self._secret if self.revealed else None)
+
+
+# ------------------------------------------------------------------ higher/lower (binary) search
+SEARCH_BITS_DEFAULT = 1000
+SEARCH_BITS_MAX = 4096
+
+
+def short_int(n: int, keep: int = 20) -> str:
+    """Hex form of a big integer, shortened to its first and last digits."""
+    h = format(n, "x")
+    return h if len(h) <= 2 * keep + 3 else f"{h[:keep]}...{h[-keep:]} ({len(h) * 4} bit hex)"
+
+
+class BinarySearch:
+    """A secret integer of `bits` bits and a higher/lower oracle.
+
+    Each guess() takes the midpoint of the interval still possible, asks the oracle
+    (equal / too low / too high) and throws away half the interval. A secret of n bits
+    is therefore found in at most about n+1 guesses (a decision tree of depth n),
+    where blind equality-only guessing would need about 2^n. When the secret is found
+    one time-code bin is earned and a new secret is hidden."""
+
+    def __init__(self, bits=SEARCH_BITS_DEFAULT):
+        self._lock = threading.Lock()
+        self.bits = 2
+        self.guesses = 0                    # all guesses since the last reset
+        self.solves = 0                     # secrets found since the last reset
+        self.solved_guesses = 0             # guesses spent on the solved secrets
+        self.round_guesses = 0              # guesses spent on the current secret
+        self.last = None                    # (verdict, guess_bits)
+        self.last_found = None              # (number, guesses it took) of the latest find
+        self.revealed = False
+        self.set_bits(bits)
+
+    def _new_round_locked(self):
+        self._secret = secrets.randbelow(1 << self.bits)
+        self.lo, self.hi = 0, (1 << self.bits) - 1
+        self.round_guesses = 0
+        self.revealed = False
+
+    def _reset_counts_locked(self):
+        self.guesses = self.solves = self.solved_guesses = 0
+        self.last = None
+        self.last_found = None
+
+    def set_bits(self, bits: int):
+        """Change the size of the secret, draw a new one and restart the counts."""
+        with self._lock:
+            self.bits = max(2, min(SEARCH_BITS_MAX, int(bits)))
+            self._new_round_locked()
+            self._reset_counts_locked()
+
+    def new_secret(self):
+        with self._lock:
+            self._new_round_locked()
+            self._reset_counts_locked()
+
+    def reveal(self):
+        with self._lock:
+            self.revealed = True
+            return self._secret
+
+    def guess(self) -> bool:
+        """One oracle query at the midpoint. True when this guess found the secret."""
+        with self._lock:
+            mid = (self.lo + self.hi) // 2
+            self.guesses += 1
+            self.round_guesses += 1
+            if mid == self._secret:
+                assert mid == self._secret                      # the found value IS the secret
+                self.solves += 1
+                self.solved_guesses += self.round_guesses
+                self.last_found = (mid, self.round_guesses)
+                self.last = ("FOUND", mid.bit_length())
+                self._new_round_locked()
+                return True
+            if mid < self._secret:
+                self.lo = mid + 1
+                self.last = ("too low, go higher", mid.bit_length())
+            else:
+                self.hi = mid - 1
+                self.last = ("too high, go lower", mid.bit_length())
+            return False
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(bits=self.bits, guesses=self.guesses, solves=self.solves,
+                        round_guesses=self.round_guesses,
+                        interval_bits=(self.hi - self.lo).bit_length(),
+                        avg=(self.solved_guesses / self.solves if self.solves else None),
+                        last=self.last, last_found=self.last_found,
+                        secret=short_int(self._secret) if self.revealed else None)
 
 
 # ------------------------------------------------------------------ time-code maths
@@ -621,6 +727,7 @@ class SimThread(threading.Thread):
     async def _run(self):
         ctl, out = self.ctl, self.out
         hidden = ctl.get("hidden")
+        search = ctl.get("search")
         try:
             src = Source(self.cam_index)
         except RuntimeError as e:
@@ -697,7 +804,8 @@ class SimThread(threading.Thread):
                  miner_queue=0, next_nonce=0,
                  last_difficulty=int(ctl.get("difficulty", DIFFICULTY_DEFAULT)),
                  last_macroblock=int(ctl.get("macroblock", MACROBLOCK_DEFAULT)),
-                 pending_block=None, timecodes_added=0, hidden_timecodes=0)
+                 pending_block=None, timecodes_added=0, hidden_timecodes=0,
+                 search_timecodes=0)
 
         # Independent asynchronous miner queue/worker.
         miner_q = asyncio.Queue(maxsize=8)
@@ -724,6 +832,8 @@ class SimThread(threading.Thread):
                 skipped_per_second=S["skipped_per_second"],
                 timecodes_added=S["timecodes_added"],
                 hidden_timecodes=S["hidden_timecodes"],
+                search_timecodes=S["search_timecodes"],
+                search=S.get("search"),
                 hidden=S.get("hidden"),
                 timecode_pending=int(ctl.get("timecode_pending", 0)),
                 miner_queue=miner_q.qsize())
@@ -795,6 +905,7 @@ class SimThread(threading.Thread):
                  for f in (driver_a, driver_b, clock_ff, analyst, miner_worker)]
 
         prev = None
+        prev_even = False                  # was the previous frame an even state?
         t_prev = time.perf_counter()
         idx = 0
         recent_q = deque(maxlen=60)
@@ -832,10 +943,14 @@ class SimThread(threading.Thread):
                 difficulty = max(0, min(DIFFICULTY_MAX, int(ctl.get("difficulty", DIFFICULTY_DEFAULT))))
                 size = max(1, min(MACROBLOCK_MAX, int(ctl.get("macroblock", MACROBLOCK_DEFAULT))))
 
-                # The ONLY thing read to mine or skip is whether an even state exists.
-                even_state = x > 0 and x % 2 == 0
+                # A hash or a hidden-number guess is only allowed after TWO SEQUENTIAL even
+                # states: this frame and the one right before it must both be even. A frame
+                # with no motion (x = 0) or an odd x breaks the run.
+                even_now = x > 0 and x % 2 == 0
+                even_state = even_now and prev_even        # armed: two evens in a row
+                prev_even = even_now
 
-                # Hidden-number test: only an even state triggers a spot check, and it reads
+                # Hidden-number test: only two sequential even states trigger a spot check, and it reads
                 # the clock-cycled candidate at this very moment.
                 hidden_hit = False
                 if hidden is not None and ctl.get("hidden_on", True) and even_state:
@@ -848,6 +963,21 @@ class SimThread(threading.Thread):
                                                     snap=hidden.snapshot())))
                 if hidden is not None:
                     S["hidden"] = hidden.snapshot()
+
+                # Higher/lower search: one oracle guess per armed frame (two sequential evens)
+                search_hit = False
+                if search is not None and ctl.get("search_on", True) and even_state:
+                    search_hit = search.guess()
+                    if search_hit:
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        S["search_timecodes"] += 1
+                        S["timecodes_added"] += 1
+                        sn = search.snapshot()
+                        out.put(("search_hit", dict(frame=idx, x=x, bits=sn["bits"],
+                                                    solves=sn["solves"], avg=sn["avg"],
+                                                    found=sn["last_found"])))
+                if search is not None:
+                    S["search"] = search.snapshot()
                 if ctl.get("mining", True):
                     if even_state:
                         S["mined_even"] += 1
@@ -919,7 +1049,7 @@ class SimThread(threading.Thread):
                     c_of_x=st.c_of_x, vC=st.vC, vB=st.vB, traj=st.traj,
                     node=st.node, orv=st.orv, andv=st.andv, gate=st.gate,
                     y_bin=st.y_bin, Q=st.Q, select=select, stats=dict(S),
-                    hidden_hit=hidden_hit, block_found=block_found, block_nonce=block_nonce,
+                    hidden_hit=hidden_hit, search_hit=search_hit, block_found=block_found, block_nonce=block_nonce,
                     block_digest=block_digest, block_time=block_time)))
                 idx += 1
         finally:
@@ -1048,10 +1178,12 @@ class App:
                         overlay=True, force=False,
                         mining=True, difficulty=DIFFICULTY_DEFAULT,
                         macroblock=MACROBLOCK_DEFAULT, timecode_pending=0,
-                        hidden_on=True)
+                        hidden_on=True, search_on=True)
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
         self.hidden.start()
         self.ctl["hidden"] = self.hidden
+        self.search = BinarySearch(SEARCH_BITS_DEFAULT)
+        self.ctl["search"] = self.search
         self.block_count = 0
         self.last_block = None
         self.photos = [None, None, None]
@@ -1249,7 +1381,7 @@ class App:
                  "Total: 0 hashes in 0.000 s\n"
                  "Macroblocks mined: 0   skipped: 0\n"
                  "Blocks found: 0\n"
-                 "Even states seen: 0\n"
+                 "Even pairs (2 in a row): 0\n"
                  "Time codes added: 0 (pending 0)\n"
                  "Skipped/sec: 0.00\n"
                  "Miner queue: 0",
@@ -1270,9 +1402,10 @@ class App:
                                   state="disabled", wrap="none")
         self.block_text.pack(fill="both", expand=True)
         self._hidden_panel(right)
+        self._search_panel(right)
 
     def _hidden_panel(self, parent):
-        box = ttk.LabelFrame(parent, text="Hidden number (spot check on even states)")
+        box = ttk.LabelFrame(parent, text="Hidden number (spot check after 2 sequential evens)")
         box.pack(fill="x", pady=(8, 0))
         self.hidden_box = box
         row = ttk.Frame(box)
@@ -1299,10 +1432,72 @@ class App:
         self.s_hhz.pack(side="left")
         for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
             self.s_hhz.bind(ev, lambda e: self.root.after_idle(self._hidden_hz_changed), add="+")
-        hbox, self.l_hidden = fixed_label(box, 480, 78, text="", font=("Consolas", 9),
+        hbox, self.l_hidden = fixed_label(box, 480, 92, text="", font=("Consolas", 9),
                                           justify="left", wraplength=480)
         hbox.pack(anchor="w", padx=6, pady=(2, 4))
         set_text(self.l_hidden, "clock idle")
+
+    def _search_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Higher/lower search (binary, 1 guess per 2 sequential evens)")
+        box.pack(fill="x", pady=(8, 0))
+        self.search_box = box
+        row = ttk.Frame(box)
+        row.pack(anchor="w", padx=6, pady=(4, 0))
+        self.v_search_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="Enabled", variable=self.v_search_on,
+                        command=lambda: self.ctl.update(search_on=self.v_search_on.get())
+                        ).pack(side="left")
+        ttk.Label(row, text="Secret bits").pack(side="left", padx=(12, 2))
+        self.v_sbits = tk.StringVar(value=str(SEARCH_BITS_DEFAULT))
+        self.s_sbits = ttk.Spinbox(row, from_=2, to=SEARCH_BITS_MAX, increment=8, width=6,
+                                   textvariable=self.v_sbits, command=self._search_bits_changed)
+        self.s_sbits.pack(side="left")
+        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
+            self.s_sbits.bind(ev, lambda e: self.root.after_idle(self._search_bits_changed), add="+")
+        ttk.Button(row, text="New secret", command=self._search_new_secret).pack(side="left", padx=(12, 2))
+        ttk.Button(row, text="Reveal", command=self._search_reveal).pack(side="left", padx=2)
+        sbox, self.l_search = fixed_label(box, 480, 106, text="", font=("Consolas", 9),
+                                          justify="left", wraplength=480)
+        sbox.pack(anchor="w", padx=6, pady=(2, 4))
+        set_text(self.l_search, "waiting for two sequential even states")
+
+    def _search_bits_changed(self, _e=None):
+        try:
+            n = int(self.v_sbits.get().strip())
+        except (ValueError, tk.TclError):
+            return
+        n = max(2, min(SEARCH_BITS_MAX, n))
+        if n != self.search.bits:
+            self.search.set_bits(n)
+            self._show_search(self.search.snapshot())
+            self._log(f"# search: {n}-bit secret, new secret drawn, counts reset")
+
+    def _search_new_secret(self):
+        self.search.new_secret()
+        self._show_search(self.search.snapshot())
+        self._log("# search: new secret drawn, counts reset")
+
+    def _search_reveal(self):
+        v = self.search.reveal()
+        self._log(f"# search secret revealed: {short_int(v, 40)}")
+        self._show_search(self.search.snapshot())
+
+    def _show_search(self, h):
+        if not h:
+            return
+        last = "none yet" if h["last"] is None else f"{h['last'][0]}"
+        avg = "n/a" if h["avg"] is None else f"{h['avg']:.1f}"
+        sec = "hidden" if h["secret"] is None else h["secret"]
+        lf = h["last_found"]
+        found = ("none yet" if lf is None else
+                 f"{short_int(lf[0], 16)} in {lf[1]} guesses")
+        set_text(self.l_search, (
+            f"secret: {h['bits']} bits   blind guessing would need ~2^{h['bits']} tries\n"
+            f"guesses: {h['guesses']} total, {h['round_guesses']} on this secret   "
+            f"found: {h['solves']}   avg guesses/found: {avg}\n"
+            f"still possible: {h['interval_bits']} bits   last: {last}\n"
+            f"last FOUND number: {found}\n"
+            f"current secret: {sec}"))
 
     def _hidden_range_changed(self, _e=None):
         try:
@@ -1346,11 +1541,14 @@ class App:
         else:
             luck = (f"luck factor: {h['luck']:.0f}%  (100% = average)   "
                     f"P(>= {h['hits']} hits by chance) = {h['luck_tail']:.1%}")
+        lf = h["last_found"]
+        found = "none yet" if lf is None else f"{lf[0]} (guessed on check #{lf[1]})"
         set_text(self.l_hidden, (
             f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (set)\n"
             f"spot checks: {h['checks']}   hits: {h['hits']}   expected ~{h['expected']:.2f}\n"
             f"{luck}\n"
-            f"last check: {last}   secret: {sec}"))
+            f"last check: {last}   secret: {sec}\n"
+            f"last FOUND number: {found}"))
 
     def _mining_changed(self, _e=None):
         """Push the difficulty / macroblock fields into the live control dict.
@@ -1382,6 +1580,7 @@ class App:
 
     def _show_miner(self, m):
         self._show_hidden(m.get("hidden"))
+        self._show_search(m.get("search"))
         set_text(self.l_miner, (
             f"Mining: {'ON' if m['mining'] else 'OFF'}\n"
             f"Hash rate: {self._rate(m['hash_rate'])}\n"
@@ -1392,9 +1591,9 @@ class App:
             f"Total: {m['hashes']} hashes in {m['total_mine_time']:.3f} s\n"
             f"Macroblocks mined: {m['macroblocks']}   skipped: {m['skipped']}\n"
             f"Blocks found: {m['blocks']}\n"
-            f"Even states seen: {m['mined_even']}\n"
+            f"Even pairs (2 in a row): {m['mined_even']}\n"
             f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
-            f"pending {m['timecode_pending']})\n"
+            f"search: {m['search_timecodes']}, pending {m['timecode_pending']})\n"
             f"Skipped/sec: {m['skipped_per_second']:.2f}\n"
             f"Miner queue: {m['miner_queue']}\n"
             f"Target now: {m['difficulty']} zero hex nibbles / "
@@ -1712,6 +1911,14 @@ class App:
                     self._log(f"HIDDEN NUMBER GUESSED frame {hh['frame']:5d} x={hh['x']} "
                               f"candidate={hh['snap']['last_check'][0]} "
                               f"after {hh['snap']['checks']} checks; time code added")
+                elif kind == "search_hit":
+                    sh = ev[1]
+                    avg = "n/a" if sh["avg"] is None else f"{sh['avg']:.1f}"
+                    val, n = sh["found"]
+                    self._log(f"SEARCH FOUND frame {sh['frame']:5d} x={sh['x']} "
+                              f"{sh['bits']}-bit secret found in {n} guesses "
+                              f"(avg {avg}); time code added")
+                    self._log(f"  number (hex, {val.bit_length()} bit): {val:x}")
                 elif kind == "block":
                     self._show_block(ev[1])
                     self._log(
@@ -1792,7 +1999,8 @@ class App:
         self._lit("Y", d["y_bin"],
                   f"[{self.ctl['y']}]  bin {d['idx'] % len(self.ctl['y'])}={d['y_bin']}"
                   + (" +BLOCK" if d.get("block_found") else "")
-                  + (" +HIDDEN" if d.get("hidden_hit") else ""))
+                  + (" +HIDDEN" if d.get("hidden_hit") else "")
+                  + (" +SEARCH" if d.get("search_hit") else ""))
         self._lit("ff", d["Q"], f"Q = {d['Q']}", GOOD)
         self._lit("clk", False, f"frame {d['idx']}  {round(d['dt'] * 1000, -1):.0f} ms")
         lamp = "#3cb043" if d["select"] else "#ddd"
