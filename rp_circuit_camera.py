@@ -88,6 +88,7 @@ import asyncio
 import hashlib
 import json
 import math
+import multiprocessing as mp
 import queue
 import secrets
 import sys
@@ -226,7 +227,8 @@ def is_probable_prime(n: int, rounds: int = 24) -> bool:
         d //= 2
         s += 1
     bases = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37]
-    bases += [2 + secrets.randbelow(n - 3) for _ in range(max(0, rounds - len(bases)))]
+    if n.bit_length() <= 1024:
+        bases += [2 + secrets.randbelow(n - 3) for _ in range(max(0, rounds - len(bases)))]
     for a in bases:
         a %= n
         if a < 2:
@@ -295,6 +297,7 @@ class Factoriser:
                     n //= p
         self.check()
         if n > 1:
+            self.log(f"testing {len(str(n))}-digit N (primality, then factor search)")
             self._split(n, out)
         out.sort()
         return out
@@ -938,6 +941,21 @@ FACTOR_BITS_DEFAULT = 256
 FACTOR_BITS_MAX = 4096
 
 
+def _engine_proc(n: int, seed: bytes, q):
+    """Runs in a CHILD PROCESS: big-int pow() never releases the GIL, so doing this work in a
+    thread froze the GUI and the camera loop. Results come back through the queue."""
+    try:
+        pool = EntropyPool()
+        pool.feed(seed)
+        fz = Factoriser(pool, lambda: False,
+                        lambda s: q.put(("log", s)), lambda t, f: q.put(("prog", t, f)))
+        fs = [int(f) for f in fz.factor(n)]
+        ok = math.prod(fs) == n and all(is_probable_prime(f) for f in fs)
+        q.put(("done", fs, ok))
+    except BaseException as e:                                   # report, never hang the parent
+        q.put(("err", f"{type(e).__name__}: {e}"))
+
+
 def short_dec(n: int, keep: int = 14) -> str:
     s = str(n)
     return s if len(s) <= 2 * keep + 3 else f"{s[:keep]}...{s[-keep:]} ({len(s)} digits)"
@@ -991,6 +1009,7 @@ class FactorSearch:
         self._secret = 0
         self.factors = []
         self.verified = False
+        self.highlow = False            # True: typed N is searched directly, no engine, no factor checks
         self.progress = ""
         self.msgs = []
         self.revealed = False
@@ -1024,7 +1043,7 @@ class FactorSearch:
             self._run += 1
             self.mode, self.state, self.n = mode, state, n
             self.width = max(1, math.isqrt(n).bit_length()) if n else 0
-            self._secret, self.factors, self.verified = 0, [], False
+            self._secret, self.factors, self.verified, self.highlow = 0, [], False, False
             self.pooled = self.pooled_n = self.round_guesses = 0
             self.progress, self.revealed, self.engine_s = "", False, None
             self.t_start = time.time()
@@ -1064,6 +1083,23 @@ class FactorSearch:
             return self._secret
 
     # ---------------------------------------------------------- typed number
+    def search_number(self, n: int):
+        """High/low only: no primality test, no factoring engine, no factor verification.
+        The oracle holds the typed number itself and answers only "is it >= trial?". Each armed frame
+        pools one bit (most significant first); after the last bit ONE equality check runs."""
+        n = int(n)
+        with self._lock:
+            self._run += 1
+            self.mode, self.n, self.state, self.highlow = "typed (high/low only)", n, "ready", True
+            self.width = max(1, n.bit_length())
+            self._secret, self.factors, self.verified = n, [n], True
+            self.pooled = self.pooled_n = self.round_guesses = 0
+            self.guesses = self.final_checks = self.solves = 0
+            self.progress, self.revealed, self.engine_s = "", False, None
+            self.last = self.last_found = None
+            self.msgs.append(f"# high/low only: N = {short_dec(n)} ({n.bit_length()} bit), no checks; "
+                             f"pooling {self.width} bits on armed frames")
+
     def factor_number(self, n: int):
         n = int(n)
         run = self._begin("typed", "factoring", n)
@@ -1077,19 +1113,42 @@ class FactorSearch:
         threading.Thread(target=self._work_typed, args=(run, n), daemon=True).start()
 
     def _work_typed(self, run, n):
-        fz = Factoriser(self.pool, lambda: self._run != run,
-                        lambda s: self._say(run, s), lambda t, f: self._prog(run, t, f))
         t0 = time.time()
+        q = mp.Queue()
+        proc = mp.Process(target=_engine_proc, args=(n, self.pool.rand_bits(256).to_bytes(32, "big"), q),
+                          daemon=True)
+        proc.start()
+        fs = ok = None
         try:
-            fs = fz.factor(n)
-        except Cancelled:
-            return
-        except Exception as e:                                    # keep the GUI alive
-            with self._lock:
-                if run == self._run:
-                    self.state, self.progress = "failed", f"engine error: {e}"
-            return
-        ok = math.prod(fs) == n and all(is_probable_prime(p) for p in fs)
+            while True:
+                if self._run != run:                              # cancelled or a new N was entered
+                    return
+                try:
+                    msg = q.get(timeout=0.1)
+                except queue.Empty:
+                    if not proc.is_alive():
+                        try:
+                            msg = q.get(timeout=0.2)              # result may still be in flight
+                        except queue.Empty:
+                            msg = ("err", "engine process stopped unexpectedly")
+                    else:
+                        continue
+                if msg[0] == "log":
+                    self._say(run, msg[1])
+                elif msg[0] == "prog":
+                    self._prog(run, msg[1], msg[2])
+                elif msg[0] == "err":
+                    with self._lock:
+                        if run == self._run:
+                            self.state, self.progress = "failed", f"engine error: {msg[1]}"
+                    return
+                else:
+                    fs, ok = msg[1], msg[2]
+                    break
+        finally:
+            if proc.is_alive():
+                proc.terminate()
+            q.close()
         with self._lock:
             if run != self._run:
                 return
@@ -1163,16 +1222,20 @@ class FactorSearch:
                 return False
             self.final_checks += 1
             c = self.pooled
-            ok = (1 < c < self.n and self.n % c == 0 and self.verified
-                  and math.prod(self.factors) == self.n)
+            if self.highlow:                                   # one equality check, nothing else
+                ok = (c == self._secret)
+            else:
+                ok = (1 < c < self.n and self.n % c == 0 and self.verified
+                      and math.prod(self.factors) == self.n)
             if not ok:
                 self.last = "final check failed, pool cleared"
                 self.pooled = self.pooled_n = 0
                 return False
             self.solves += 1
-            self.last_found = (c, self.n // c, self.round_guesses)
+            self.last_found = (c, 1 if self.highlow else self.n // c, self.round_guesses)
             self._record(self.mode, self.n, self.factors, "solved", p=c, queries=self.round_guesses)
-            self.last = "FOUND: N % p == 0 and the factorisation multiplies back to N"
+            self.last = ("FOUND: pooled bits equal the number" if self.highlow
+                         else "FOUND: N % p == 0 and the factorisation multiplies back to N")
             self.state = "solved"
             regen = self.mode == "generated"
         if regen:
@@ -2173,6 +2236,8 @@ class App:
         self.e_fn.pack(side="left")
         self.e_fn.bind("<Return>", lambda e: self._factor_go())
         ttk.Button(row, text="Factor N", command=self._factor_go).pack(side="left", padx=(8, 2))
+        self.v_fhl = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="high/low only", variable=self.v_fhl).pack(side="left", padx=(4, 2))
         ttk.Button(row, text="Cancel", command=self._factor_cancel).pack(side="left", padx=2)
         ttk.Button(row, text="Save numbers", command=self._factor_save).pack(side="left", padx=2)
         row2 = ttk.Frame(box)
@@ -2194,7 +2259,10 @@ class App:
         except ValueError as e:
             messagebox.showerror("Number", str(e))
             return
-        self.fsearch.factor_number(n)
+        if self.v_fhl.get():
+            self.fsearch.search_number(n)
+        else:
+            self.fsearch.factor_number(n)
 
     def _factor_generate(self):
         try:
@@ -2770,6 +2838,7 @@ def fit_window(win, content_w=1180, content_h=1180):
 
 
 if __name__ == "__main__":
+    mp.freeze_support()
     root = tk.Tk()
     app = App(root)
     root.update_idletasks()
