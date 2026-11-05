@@ -1735,6 +1735,20 @@ class SimThread(threading.Thread):
                 if even_state:
                     S["mined_even"] += 1                   # armed frames seen
 
+                # BTC high/low oracle: one armed release is consumed on the next even state.
+                if even_now and ctl.get("btc_release_armed", False):
+                    ctl["btc_release_armed"] = False
+                    ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                    S["btc_timecodes"] = S.get("btc_timecodes", 0) + 1
+                    S["timecodes_added"] = S.get("timecodes_added", 0) + 1
+                    btc_call = ctl.get("btc_last_call", "--")
+                    btc_price = ctl.get("btc_last_price", 0.0)
+                    out.put(("log",
+                        f"BTC HIGH/LOW ORACLE EVEN RELEASE: even frame x={x}; "
+                        f"oracle call={btc_call}; BTC/USDT=${btc_price:,.2f}; "
+                        f"one time-code bin released; pending={ctl['timecode_pending']}."
+                    ))
+
                 # Hidden-number test: only two sequential even states trigger a spot check, and it reads
                 # the clock-cycled candidate at this very moment.
                 hidden_hit = False
@@ -1869,7 +1883,11 @@ MINER_INTERVAL = 0.2               # s between miner panel refreshes
 
 
 class BitcoinHighLowOracle:
-    """Binance BTC/USDT price, one HIGH/LOW call and one time-code release per check."""
+    """Binance BTC/USDT HIGH/LOW oracle.
+
+    Each check records a HIGH/LOW call in the log. A successful, driver-verified check
+    arms one release; the circuit releases it only on its next even state.
+    """
 
     URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
@@ -1891,7 +1909,7 @@ class BitcoinHighLowOracle:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _driver_b_checks(raw: bytes, data: dict, price) -> dict:
+    def _driver_b_checks(raw, data, price):
         checks = {
             "payload_nonempty": isinstance(raw, bytes) and len(raw) > 0,
             "json_object": isinstance(data, dict),
@@ -1905,7 +1923,7 @@ class BitcoinHighLowOracle:
         return checks
 
     @staticmethod
-    def _driver_a_check(raw: bytes) -> dict:
+    def _driver_a_check(raw):
         digest = hashlib.sha256(raw).digest()
         x = int.from_bytes(digest[:8], "big") | 1
         base = int.from_bytes(digest[8:12], "big") % max(2, x - 2) + 2 if x > 3 else 2
@@ -2054,7 +2072,7 @@ class ScrollFrame(ttk.Frame):
 class App:
     def __init__(self, window):
         self.window = window                          # the real Tk window
-        window.title("RP circuit + hidden number, bit search and per-check Bitcoin releases")
+        window.title("RP circuit + hidden number, bit search and BTC HIGH/LOW even-frame oracle")
         self.scroller = ScrollFrame(window)
         self.scroller.pack(fill="both", expand=True)
         root = self.scroller.inner                    # every widget below lives in here
@@ -2226,7 +2244,7 @@ class App:
     def _btc_panel(self):
         panel = ttk.LabelFrame(
             self.root,
-            text="Bitcoin oracle — one Binance check, one HIGH/LOW call, one time-code release"
+            text="Bitcoin HIGH/LOW oracle — logs calls; releases on the next even frame"
         )
         panel.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
@@ -2250,7 +2268,7 @@ class App:
                         command=self.btc_toggle_auto).pack(side="left", padx=4)
 
         self.btc_result_var = tk.StringVar(
-            value="Auto-check off. Every successful driver-verified check makes one HIGH/LOW call and releases exactly one time code."
+            value="Auto-check off. Each factual check logs a HIGH/LOW call and arms one release for the next even frame."
         )
         ttk.Label(panel, textvariable=self.btc_result_var, wraplength=720).pack(
             side="left", padx=12, pady=6, fill="x", expand=True
@@ -2259,7 +2277,7 @@ class App:
     def btc_toggle_auto(self):
         if self.btc_auto_var.get():
             self.btc_auto_running = True
-            self._log("BTC oracle: automatic per-check HIGH/LOW and time-code release enabled.")
+            self._log("BTC HIGH/LOW oracle: automatic checking enabled.")
             self.btc_refresh()
             self.btc_schedule_auto()
         else:
@@ -2268,8 +2286,9 @@ class App:
                 try: self.root.after_cancel(self.btc_auto_job)
                 except Exception: pass
             self.btc_auto_job = None
-            self._log("BTC oracle: automatic checking disabled.")
-            self.btc_result_var.set("Auto-check stopped. No further per-check releases.")
+            self.ctl["btc_release_armed"] = False
+            self._log("BTC HIGH/LOW oracle: automatic checking disabled; armed release cancelled.")
+            self.btc_result_var.set("Auto-check stopped. No further oracle releases.")
 
     def btc_schedule_auto(self):
         if not self.btc_auto_running: return
@@ -2291,55 +2310,57 @@ class App:
                 f"After next check: {call} "
                 f"(from ${self.btc.last_prediction['made_at_price']:,.2f})"
             )
+            self.ctl["btc_last_call"] = call
+            self.ctl["btc_last_price"] = price
 
             checks = self.btc.last_checks
             a, b = checks["driver_a"], checks["driver_b"]
             change = "price changed" if changed else "price unchanged"
 
             if factual:
-                # Exactly one release for this check.
-                self.ctl["timecode_pending"] = self.ctl.get("timecode_pending", 0) + 1
-                self.btc.released_count += 1
+                self.ctl["btc_release_armed"] = True
                 self.btc_result_var.set(
-                    f"CHECK COMPLETE ({change}); Driver B={b['driver_b']}, Driver A={a['driver_a']}; "
-                    f"after next check: {call}; one time code released."
+                    f"FACTUAL ({change}); Driver B={b['driver_b']}, Driver A={a['driver_a']}; "
+                    f"oracle call {call}; release armed for next even frame."
                 )
                 self._log(
-                    f"BTC CHECK COMPLETE (Binance): ${price:,.2f} ({change}); "
+                    f"BTC HIGH/LOW ORACLE CHECK: ${price:,.2f} ({change}); "
                     f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; "
-                    f"after next check: {call}; one time code released."
+                    f"oracle call={call}; release armed for next even frame."
                 )
             else:
+                self.ctl["btc_release_armed"] = False
                 self.btc_result_var.set(
-                    f"CHECK FAILED ({change}); Driver B={b['driver_b']}, "
-                    f"Driver A={a['driver_a']}; no time code released."
+                    f"NOT FACTUAL ({change}); Driver B={b['driver_b']}, "
+                    f"Driver A={a['driver_a']}; no oracle release armed."
                 )
                 self._log(
-                    f"BTC CHECK FAILED (Binance): ${price:,.2f} ({change}); "
+                    f"BTC HIGH/LOW ORACLE REJECTED: ${price:,.2f} ({change}); "
                     f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; "
-                    f"no time code released."
+                    f"no release armed."
                 )
 
             if result:
                 outcome = "CORRECT" if result["correct"] else "WRONG"
                 self._log(
-                    f"BTC CHECK RESULT: previous call {result['guess']}; "
+                    f"BTC HIGH/LOW ORACLE RESULT: previous call {result['guess']}; "
                     f"price after check was {result['actual_direction']}; "
                     f"${result['previous']:,.2f} -> ${result['actual']:,.2f}; "
                     f"{outcome}; record {self.btc.correct}/{self.btc.total}"
                 )
 
             self._log(
-                f"BTC NEXT CHECK: price expected {call} relative to "
+                f"BTC HIGH/LOW ORACLE NEXT CALL: {call} from "
                 f"${self.btc.last_prediction['made_at_price']:,.2f}; "
                 f"totals checks={self.btc.fresh_count}, factual={self.btc.factual_count}, "
-                f"failed={self.btc.rejected_count}, releases={self.btc.released_count}, "
+                f"rejected={self.btc.rejected_count}, released={self.btc.released_count}, "
                 f"calls={self.btc.correct}/{self.btc.total}."
             )
         except Exception as exc:
+            self.ctl["btc_release_armed"] = False
             self.btc.last_factual = False
-            self.btc_result_var.set(f"Binance check failed: {exc}; no time code released.")
-            self._log(f"Binance BTC check failed: {exc}; no time code released.")
+            self.btc_result_var.set(f"Binance check failed: {exc}; no oracle release armed.")
+            self._log(f"BTC HIGH/LOW ORACLE ERROR: {exc}; no release armed.")
 
     def btc_guess(self, direction):
         try:
@@ -2349,17 +2370,19 @@ class App:
                 f"After next check: {call} "
                 f"(from ${self.btc.last_prediction['made_at_price']:,.2f})"
             )
+            self.ctl["btc_last_call"] = call
+            self.ctl["btc_last_price"] = self.btc.pending_price
             self.btc_result_var.set(
-                f"Manual call pending: after the next check, BTC/USDT will be {call} "
+                f"Manual oracle call: after the next check, BTC/USDT will be {call} "
                 f"relative to ${self.btc.pending_price:,.2f}."
             )
             self._log(
-                f"BTC MANUAL CALL: after the next check, price will be {call} "
-                f"relative to ${self.btc.pending_price:,.2f}."
+                f"BTC HIGH/LOW ORACLE MANUAL CALL: {call} from "
+                f"${self.btc.pending_price:,.2f}."
             )
         except Exception as exc:
             self.btc_result_var.set(f"Bitcoin guess failed: {exc}")
-            self._log(f"BTC guess failed: {exc}")
+            self._log(f"BTC HIGH/LOW ORACLE ERROR: {exc}")
 
     def _miner_panel(self):
         panel = ttk.LabelFrame(self.root, text="Time-code sources")
