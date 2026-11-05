@@ -1894,19 +1894,21 @@ MINER_INTERVAL = 0.2               # s between miner panel refreshes
 
 
 class BitcoinHighLowOracle:
-    """Binance BTC/USDT HIGH/LOW oracle driven by a binary decision tree.
+    """Binance BTC/USDT HIGH/LOW oracle: continuous up/down bits, binary decision tree,
+    one end check per window.
 
-    The tree is a binary trie over the market's own history. A node is a path of recent
-    moves (U = price rose, D = price fell; unchanged prices carry no direction and are
-    skipped). Each node counts how often the NEXT move was U or D. To call the next move,
-    the deepest node (up to `depth` moves) that has at least MIN_OBS observations and a
-    strict majority makes the call; otherwise a shorter context is tried, and if none
-    qualifies the tree makes NO call. Every observed move updates the nodes for all
-    context lengths 0..MAX_DEPTH, so changing `depth` never loses data.
+    observe()   : called for EVERY sample (e.g. each second). Records the binary value
+                  (U = price rose, D = price fell, unchanged = skipped) in the recent-bit
+                  context, and trains the tree with every sample that is now `window_s`
+                  seconds old: its outcome is the price now versus the price then.
+    end_check() : called ONCE per window. Scores the call made at the start of the window
+                  (a tie is not scored) and makes the call for the next window. The call
+                  comes from the deepest tree node (up to `depth` bits) with at least
+                  MIN_OBS observations and a strict majority; otherwise NO CALL.
 
-    A call is scored on the next check (a tie is not scored). BTC over seconds/minutes is
-    close to a random walk, so expect ~50%; the panel shows the binomial p-value.
-    fetch_price() does network I/O: call it from a worker thread only.
+    Windows do not overlap, so the binomial p-value of the end-check record is valid.
+    BTC over seconds/minutes is close to a random walk: expect ~50%.
+    fetch_sample() does network I/O: call it from a worker thread only.
     """
 
     URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
@@ -1915,8 +1917,8 @@ class BitcoinHighLowOracle:
 
     def __init__(self):
         self._lock = threading.RLock()
-        self.depth = 1
-        self.prices = deque(maxlen=500)
+        self.depth = 3
+        self.window_s = 10.0
         self.last_price = None
         self.last_hash = None
         self.last_factual = None
@@ -1928,27 +1930,31 @@ class BitcoinHighLowOracle:
         self.released_count = 0          # kept for compatibility; the GUI shows ctl["btc_released"]
         self.reset_tree()
 
-    # ---------------------------------------------------------- tree state
+    # ---------------------------------------------------------- state
     def reset_tree(self):
         with self._lock:
             self.tree = {}                                   # path tuple -> [ups, downs]
-            self.moves = deque(maxlen=self.MAX_DEPTH)        # recent directions, "U"/"D"
+            self.moves = deque(maxlen=self.MAX_DEPTH)        # recent binary values, "U"/"D"
+            self.samples = deque(maxlen=20000)               # (time, price, context) waiting for the window
+            self._prev_tick_price = None
             self.pending_guess = None
             self.pending_price = None
             self.last_prediction = None
             self.correct = self.total = self.ties = self.abstains = 0
+            self.ticks = self.trained = 0
 
     def set_depth(self, depth):
         with self._lock:
             self.depth = max(1, min(self.MAX_DEPTH, int(depth)))
 
-    def _learn(self, move):
-        h = list(self.moves)
-        for L in range(0, len(h) + 1):
-            ctx = tuple(h[len(h) - L:])
-            node = self.tree.setdefault(ctx, [0, 0])
-            node[0 if move == "U" else 1] += 1
-        self.moves.append(move)
+    def set_window(self, seconds):
+        with self._lock:
+            self.window_s = max(1.0, float(seconds))
+
+    def _learn_ctx(self, ctx, outcome):
+        for L in range(0, len(ctx) + 1):
+            node = self.tree.setdefault(ctx[len(ctx) - L:], [0, 0])
+            node[0 if outcome == "U" else 1] += 1
 
     def _predict(self):
         """(call, depth_used, ups, downs) from the deepest qualifying node, or None."""
@@ -1958,6 +1964,9 @@ class BitcoinHighLowOracle:
             if node and sum(node) >= self.MIN_OBS and node[0] != node[1]:
                 return ("higher" if node[0] > node[1] else "lower", L, node[0], node[1])
         return None
+
+    def recent_bits(self):
+        return "".join(self.moves) or "-"
 
     # ---------------------------------------------------------- checks (unchanged logic)
     @staticmethod
@@ -1988,37 +1997,59 @@ class BitcoinHighLowOracle:
         checks["driver_a"] = all(checks.values())
         return {"digest": digest.hex(), "x": x, "composite": composite, **checks}
 
-    # ---------------------------------------------------------- network + scoring
-    def fetch_price(self):
+    # ---------------------------------------------------------- network
+    def fetch_sample(self):
+        """One Binance request. Returns (price, factual, a_checks, b_checks)."""
         request = urllib.request.Request(
             self.URL, headers={"User-Agent": "rp-circuit-btc-oracle/1.0"})
         with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
         data = json.loads(raw.decode())
         price = float(data["price"])
-
         b_checks = self._driver_b_checks(raw, data, price)
         a_checks = self._driver_a_check(raw)
-        factual = b_checks["driver_b"] and a_checks["driver_a"]
-        return self._ingest(price, factual, a_checks, b_checks)
+        return price, b_checks["driver_b"] and a_checks["driver_a"], a_checks, b_checks
 
-    def _ingest(self, price, factual, a_checks, b_checks):
+    # ---------------------------------------------------------- every sample
+    def observe(self, price, factual, a_checks, b_checks, now=None):
+        now = time.time() if now is None else now
         with self._lock:
-            changed = self.last_price != price
             self.last_price = price
             self.last_hash = a_checks["digest"]
             self.last_factual = factual
-            self.last_checks = {"driver_a": a_checks, "driver_b": b_checks,
-                                "factual": factual, "changed": changed}
-            self.last_update = time.time()
+            self.last_checks = {"driver_a": a_checks, "driver_b": b_checks, "factual": factual}
+            self.last_update = now
             self.fresh_count += 1
             if factual:
                 self.factual_count += 1
             else:
                 self.rejected_count += 1
 
-            # 1. score the previous tree call; an unchanged price is a tie and is NOT scored
-            prediction_result = None
+            # train with every sample whose window has now ended
+            while self.samples and now - self.samples[0][0] >= self.window_s:
+                _t0, p0, ctx = self.samples.popleft()
+                if price != p0:
+                    self._learn_ctx(ctx, "U" if price > p0 else "D")
+                    self.trained += 1
+
+            # the binary value of this sample
+            if self._prev_tick_price is not None and price != self._prev_tick_price:
+                self.moves.append("U" if price > self._prev_tick_price else "D")
+            self._prev_tick_price = price
+            self.ticks += 1
+            self.samples.append((now, price, tuple(self.moves)))
+
+    # ---------------------------------------------------------- once per window
+    def end_check(self):
+        """Score the previous window's call, then make the call for the next window.
+        Returns (price, result_or_None, factual, changed) or None if there is no sample yet."""
+        with self._lock:
+            if self.last_price is None:
+                return None
+            price = self.last_price
+            changed = self.pending_price is None or price != self.pending_price
+
+            result = None
             if self.pending_guess is not None and self.pending_price is not None:
                 if price == self.pending_price:
                     self.ties += 1
@@ -2027,7 +2058,7 @@ class BitcoinHighLowOracle:
                     is_correct = (self.pending_guess == "higher") == went_up
                     self.total += 1
                     self.correct += int(is_correct)
-                    prediction_result = {
+                    result = {
                         "guess": self.pending_guess.upper(),
                         "previous": self.pending_price,
                         "actual": price,
@@ -2035,12 +2066,6 @@ class BitcoinHighLowOracle:
                         "correct": is_correct,
                     }
 
-            # 2. teach the tree the observed move (only a non-zero change has a direction)
-            if self.prices and price != self.prices[-1]:
-                self._learn("U" if price > self.prices[-1] else "D")
-            self.prices.append(price)
-
-            # 3. the tree makes the next call, or no call if it has no qualifying node
             pred = self._predict()
             if pred is None:
                 self.abstains += 1
@@ -2053,7 +2078,7 @@ class BitcoinHighLowOracle:
                 self.pending_price = price
                 self.last_prediction = {"guess": call.upper(), "made_at_price": price,
                                         "node": (used, ups, downs)}
-            return price, prediction_result, factual, changed
+            return price, result, self.last_factual, changed
 
     def stats(self):
         with self._lock:
@@ -2061,7 +2086,8 @@ class BitcoinHighLowOracle:
             return dict(correct=k, total=n, ties=self.ties, abstains=self.abstains,
                         rate=(k / n if n else None),
                         p_value=(prob_at_least(k, n, 0.5) if n else None),
-                        nodes=len(self.tree), depth=self.depth)
+                        nodes=len(self.tree), depth=self.depth, window=self.window_s,
+                        ticks=self.ticks, trained=self.trained, bits=self.recent_bits())
 
 
 class ScrollFrame(ttk.Frame):
@@ -2312,12 +2338,14 @@ class App:
                         ).pack(side="left", padx=8)
 
     def _btc_panel(self):
-        self._btc_busy = False
+        self._btc_stop = None
         self._btc_q = queue.Queue()
+        self._btc_tick_s = 1.0
+        self._btc_window_s = 10.0
         panel = ttk.LabelFrame(
             self.root,
-            text="Bitcoin HIGH/LOW oracle: binary decision tree; a time code is released "
-                 "only after a correct tree call"
+            text="Bitcoin HIGH/LOW oracle: continuous up/down samples train a binary tree; "
+                 "one end check every n seconds; release only after a correct call"
         )
         panel.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
         row1 = ttk.Frame(panel)
@@ -2328,40 +2356,58 @@ class App:
         self.btc_price_var = tk.StringVar(value="BTC/USDT: --")
         ttk.Label(row1, textvariable=self.btc_price_var, width=22,
                   font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=8)
-        ttk.Button(row1, text="Check now", command=self.btc_refresh).pack(side="left", padx=4)
         self.btc_call_var = tk.StringVar(value="Tree call: --")
         ttk.Label(row1, textvariable=self.btc_call_var, width=50,
                   font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=10)
 
-        ttk.Label(row1, text="Tree depth").pack(side="left", padx=(8, 2))
+        ttk.Label(row1, text="Sample every").pack(side="left", padx=(8, 2))
+        self.btc_tick_var = tk.StringVar(value="1")
+        ttk.Spinbox(row1, from_=0.5, to=60, increment=0.5, width=5,
+                    textvariable=self.btc_tick_var).pack(side="left")
+        ttk.Label(row1, text="s   End check every").pack(side="left", padx=(2, 2))
+        self.btc_period_var = tk.StringVar(value="10")
+        ttk.Spinbox(row1, from_=1, to=3600, width=5, textvariable=self.btc_period_var).pack(side="left")
+        ttk.Label(row1, text="s").pack(side="left", padx=(2, 8))
+
+        ttk.Label(row1, text="Depth").pack(side="left", padx=(4, 2))
         self.btc_depth_var = tk.StringVar(value=str(self.btc.depth))
-        dsp = ttk.Spinbox(row1, from_=1, to=BitcoinHighLowOracle.MAX_DEPTH, width=4,
+        dsp = ttk.Spinbox(row1, from_=1, to=BitcoinHighLowOracle.MAX_DEPTH, width=3,
                           textvariable=self.btc_depth_var, command=self._btc_depth_changed)
         dsp.pack(side="left")
         for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
             dsp.bind(ev, lambda e: self.root.after_idle(self._btc_depth_changed), add="+")
         ttk.Button(row1, text="Reset tree", command=self._btc_reset_tree).pack(side="left", padx=(8, 2))
-
-        self.btc_period_var = tk.StringVar(value="10")
-        ttk.Label(row1, text="Check every").pack(side="left", padx=(12, 2))
-        ttk.Spinbox(row1, from_=1, to=3600, width=5, textvariable=self.btc_period_var).pack(side="left")
-        ttk.Label(row1, text="s").pack(side="left", padx=(2, 8))
         self.btc_auto_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row1, text="Auto-check", variable=self.btc_auto_var,
-                        command=self.btc_toggle_auto).pack(side="left", padx=4)
+        ttk.Checkbutton(row1, text="Run", variable=self.btc_auto_var,
+                        command=self.btc_toggle_auto).pack(side="left", padx=6)
 
         import types
-        sbox, slab = fixed_label(row2, 440, 36, text="", font=("Consolas", 9),
-                                 justify="left", wraplength=434)
+        sbox, slab = fixed_label(row2, 540, 52, text="", font=("Consolas", 9),
+                                 justify="left", wraplength=534)
         sbox.pack(side="left", padx=8)
-        rbox, rlab = fixed_label(row2, 560, 36, text="", justify="left", wraplength=554)
+        rbox, rlab = fixed_label(row2, 480, 52, text="", justify="left", wraplength=474)
         rbox.pack(side="left", padx=12)
         self.btc_stats_var = types.SimpleNamespace(set=lambda t: set_text(slab, t))
         self.btc_result_var = types.SimpleNamespace(set=lambda t: set_text(rlab, t))
-        self.btc_stats_var.set("tree: no scored calls yet")
-        self.btc_result_var.set("A release is armed only when the tree's previous call matched the "
-                                "market move on a factual check.")
+        self.btc_stats_var.set("tree: no samples yet")
+        self.btc_result_var.set("Tick Run. A release is armed only when the previous window's call "
+                                "matched the market move on a factual end check.")
         self.root.after(100, self._btc_poll)
+
+    def _btc_read_timing(self):
+        """Main thread only: copy the Tk settings into plain attributes the sampler thread reads."""
+        try:
+            tick = max(0.5, float(self.btc_tick_var.get()))
+        except (ValueError, tk.TclError):
+            tick = self._btc_tick_s
+        try:
+            win = max(tick, float(self.btc_period_var.get()))
+        except (ValueError, tk.TclError):
+            win = self._btc_window_s
+        self._btc_tick_s = tick
+        if win != self._btc_window_s:
+            self._btc_window_s = win
+            self.btc.set_window(win)
 
     def _btc_depth_changed(self, _e=None):
         try:
@@ -2377,63 +2423,61 @@ class App:
         self.btc.reset_tree()
         self.ctl["btc_release_armed"] = False
         self._btc_show_stats()
-        self._log("BTC HIGH/LOW ORACLE: tree and score reset; armed release cancelled.")
+        self._log("BTC HIGH/LOW ORACLE: tree, samples and score reset; armed release cancelled.")
 
     def btc_toggle_auto(self):
+        """Run / stop the sampler thread."""
         if self.btc_auto_var.get():
-            self.btc_auto_running = True
-            self._log("BTC HIGH/LOW oracle: automatic checking enabled.")
-            self.btc_refresh()
-            self.btc_schedule_auto()
+            if self._btc_stop is not None:
+                self._btc_stop.set()
+            self._btc_read_timing()
+            self.btc.set_window(self._btc_window_s)
+            self._btc_stop = threading.Event()
+            threading.Thread(target=self._btc_sampler, args=(self._btc_stop,), daemon=True).start()
+            self._log(f"BTC HIGH/LOW oracle: sampling every {self._btc_tick_s:g} s, "
+                      f"end check every {self._btc_window_s:g} s.")
         else:
-            self.btc_auto_running = False
-            if self.btc_auto_job is not None:
-                try:
-                    self.root.after_cancel(self.btc_auto_job)
-                except Exception:
-                    pass
-            self.btc_auto_job = None
+            if self._btc_stop is not None:
+                self._btc_stop.set()
+            self._btc_stop = None
             self.ctl["btc_release_armed"] = False
-            self._log("BTC HIGH/LOW oracle: automatic checking disabled; armed release cancelled.")
-            self.btc_result_var.set("Auto-check stopped. No further oracle releases.")
+            self._log("BTC HIGH/LOW oracle: sampling stopped; armed release cancelled.")
+            self.btc_result_var.set("Stopped. No further oracle releases.")
 
-    def btc_schedule_auto(self):
-        if not self.btc_auto_running:
-            return
-        try:
-            seconds = max(1, int(float(self.btc_period_var.get())))
-        except Exception:
-            seconds = 10
-        self.btc_auto_job = self.root.after(seconds * 1000, self.btc_auto_tick)
-
-    def btc_auto_tick(self):
-        if not self.btc_auto_running:
-            return
-        self.btc_refresh()
-        self.btc_schedule_auto()
-
-    # ---- the network call runs in a worker thread; only the Tk thread touches widgets
-    def btc_refresh(self):
-        if self._btc_busy:                         # a check is already running
-            return
-        self._btc_busy = True
-        self.btc_result_var.set("Checking Binance ...")
-        threading.Thread(target=self._btc_worker, daemon=True).start()
-
-    def _btc_worker(self):                         # OFF the Tk thread
-        try:
-            self._btc_q.put(("ok", self.btc.fetch_price()))
-        except Exception as exc:
-            self._btc_q.put(("err", exc))
+    def _btc_sampler(self, stop):                  # OFF the Tk thread
+        next_end = None
+        last_err = 0.0
+        while not stop.is_set():
+            t0 = time.time()
+            try:
+                price, factual, a, b = self.btc.fetch_sample()
+                self.btc.observe(price, factual, a, b)
+                now = time.time()
+                if next_end is None or now >= next_end:         # the ONE end check of this window
+                    res = self.btc.end_check()
+                    next_end = now + self._btc_window_s
+                    if res is not None:
+                        self._btc_q.put(("end", res))
+                else:
+                    self._btc_q.put(("tick", price))
+            except Exception as exc:
+                if time.time() - last_err >= 10:                # do not spam the log every second
+                    last_err = time.time()
+                    self._btc_q.put(("err", exc))
+            stop.wait(max(0.05, self._btc_tick_s - (time.time() - t0)))
 
     def _btc_poll(self):                           # Tk thread
+        self._btc_read_timing()
+        last_price = None
         try:
             while True:
                 kind, payload = self._btc_q.get_nowait()
-                self._btc_busy = False
                 try:
-                    if kind == "ok":
+                    if kind == "tick":
+                        last_price = payload
+                    elif kind == "end":
                         self._btc_apply(*payload)
+                        last_price = None
                     else:
                         self._btc_fail(payload)
                 except Exception as exc:
@@ -2441,28 +2485,28 @@ class App:
                     self._log(f"BTC panel error: {exc!r}")
         except queue.Empty:
             pass
+        if last_price is not None:
+            self.btc_price_var.set(f"BTC/USDT: ${last_price:,.2f}")
+            self._btc_show_stats()
         self.root.after(100, self._btc_poll)
 
     def _btc_fail(self, exc):
-        self.ctl["btc_release_armed"] = False
-        self.btc.last_factual = False
-        self.btc_result_var.set(f"Binance check failed: {exc}; no oracle release armed.")
-        self._log(f"BTC HIGH/LOW ORACLE ERROR: {exc}; no release armed.")
+        # a failed sample is simply retried on the next tick; an armed release is kept
+        self.btc_result_var.set(f"Binance sample failed: {exc}; retrying.")
+        self._log(f"BTC HIGH/LOW ORACLE ERROR: {exc}; retrying.")
 
     def _btc_show_stats(self):
         s = self.btc.stats()
         rel = self.ctl.get("btc_released", 0)
-        head = f"tree depth {s['depth']}, {s['nodes']} nodes"
-        if s["total"]:
-            self.btc_stats_var.set(
-                f"{head}: {s['correct']}/{s['total']} = {s['rate']:.1%}  "
-                f"P(>= by chance)={s['p_value']:.2f}\n"
-                f"no-call {s['abstains']}   ties {s['ties']}   released {rel}")
-        else:
-            self.btc_stats_var.set(f"{head}: no scored calls yet\n"
-                                   f"no-call {s['abstains']}   ties {s['ties']}   released {rel}")
+        rec = (f"{s['correct']}/{s['total']} = {s['rate']:.1%}  P(>= by chance)={s['p_value']:.2f}"
+               if s["total"] else "no scored end checks yet")
+        self.btc_stats_var.set(
+            f"depth {s['depth']}, {s['nodes']} nodes, trained {s['trained']}: {rec}\n"
+            f"samples {s['ticks']}  last bits {s['bits']}  no-call {s['abstains']}  "
+            f"ties {s['ties']}  released {rel}")
 
     def _btc_apply(self, price, result, factual, changed):
+        """One END CHECK finished (once per window)."""
         self.btc_price_var.set(f"BTC/USDT: ${price:,.2f}")
         pred = self.btc.last_prediction
         call = pred["guess"]
@@ -2476,7 +2520,7 @@ class App:
         a, b = checks["driver_a"], checks["driver_b"]
         change = "price changed" if changed else "price unchanged (tie, not scored)"
 
-        # THE RULE: release only if the check is factual AND the tree's previous call matched the move
+        # THE RULE: release only if the end check is factual AND the previous window's call matched
         arm = bool(factual and result is not None and result["correct"])
         self.ctl["btc_release_armed"] = arm
 
@@ -2484,7 +2528,7 @@ class App:
             self.btc_result_var.set(
                 f"TREE GUESSED RIGHT ({result['guess']} -> {result['actual_direction']}); "
                 f"release armed for the next even frame. Next call: {call}.")
-            self._log(f"BTC HIGH/LOW ORACLE CHECK: ${price:,.2f} ({change}); tree call "
+            self._log(f"BTC HIGH/LOW ORACLE END CHECK: ${price:,.2f} ({change}); tree call "
                       f"{result['guess']} was CORRECT; Driver A={a['driver_a']}, "
                       f"Driver B={b['driver_b']}; release armed for next even frame.")
         elif factual:
@@ -2493,7 +2537,7 @@ class App:
             else:
                 reason = f"tree guessed wrong ({result['guess']} -> {result['actual_direction']})"
             self.btc_result_var.set(f"FACTUAL ({change}) but {reason}; no release. Next call: {call}.")
-            self._log(f"BTC HIGH/LOW ORACLE CHECK: ${price:,.2f} ({change}); {reason}; "
+            self._log(f"BTC HIGH/LOW ORACLE END CHECK: ${price:,.2f} ({change}); {reason}; "
                       f"no release armed; next call={call}.")
         else:
             self.btc_result_var.set(
