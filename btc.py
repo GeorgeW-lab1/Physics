@@ -1325,6 +1325,48 @@ def frames_needed(Y: str, n_open: int):
     return k
 
 
+# ------------------------------------------------------------------ tunable variables
+# key: (label, default, low, high, step, is_int, tooltip-ish note)
+TUNE_DEFAULTS = dict(
+    bin_w=1, phase=0, clock="frames", bin_ms=100.0, invert=False, bins_per_hit=1,
+    rc_ms=RC_B * 1000, tau_ms=TAU_NODE * 1000, vs=VS, vbe=V_BE, vih=V_IH,
+    node_thr=0.5, warmup=WARMUP, blur=5)
+
+
+def y_bin_at(ctl: dict, idx: int, elapsed: float):
+    """Time-code bin for this frame -> (bit, bin_index).
+    clock 'frames': the bin advances every bin_w camera frames.
+    clock 'ms'    : the bin advances every bin_ms milliseconds of wall-clock time.
+    phase rotates the code, invert flips every bit."""
+    y = ctl["y"]
+    if ctl.get("clock", "frames") == "ms":
+        n = int(elapsed * 1000.0 // max(1.0, float(ctl.get("bin_ms", 100.0))))
+    else:
+        n = idx // max(1, int(ctl.get("bin_w", 1)))
+    b = (n + int(ctl.get("phase", 0))) % len(y)
+    bit = int(y[b])
+    if ctl.get("invert"):
+        bit ^= 1
+    return bit, b
+
+
+def effective_code(ctl: dict) -> str:
+    """The code as the circuit sees it frame by frame (one char per frame, periodic).
+    Used by the error-bound analysis. In 'ms' mode the bin width in frames is estimated
+    from the measured frame rate."""
+    y = ctl["y"]
+    if ctl.get("clock", "frames") == "ms":
+        fps = ctl.get("fps_est") or 30.0
+        w = max(1, round(float(ctl.get("bin_ms", 100.0)) / 1000.0 * fps))
+    else:
+        w = max(1, int(ctl.get("bin_w", 1)))
+    ph = int(ctl.get("phase", 0)) % len(y)
+    rot = y[ph:] + y[:ph]
+    if ctl.get("invert"):
+        rot = "".join("1" if c == "0" else "0" for c in rot)
+    return "".join(c * w for c in rot)
+
+
 # ------------------------------------------------------------------ driver analysis
 _WD: dict = {}
 
@@ -1529,32 +1571,17 @@ class Source:
         if getattr(self, "_closing", False):
             return
         self._closing = True
-
-        self.ctl.stop = True
-        self.fsearch.cancel()
-        self.hidden.stop()
-
-        # Stop periodic Tk callbacks before destroying widgets.
-        for job in ("poll", "factortick"):
-            try:
-                self.root.after_cancel(getattr(self, job + "_job", "0"))
-            except Exception:
-                pass
-
-        self.root.after(150, self._shutdown)
-
-
-    def _shutdown(self):
         try:
-            self.root.destroy()
-        except tk.TclError:
+            self.cap.release()
+        except Exception:
             pass
 
 
-def downscale(gray: np.ndarray) -> np.ndarray:
+def downscale(gray: np.ndarray, blur: int = 5) -> np.ndarray:
     """Shrink and blur so sensor grain does not count as motion."""
     small = cv2.resize(gray, (SW, SH), interpolation=cv2.INTER_AREA)
-    return cv2.GaussianBlur(small, (5, 5), 0)
+    k = max(1, int(blur)) | 1                      # kernel must be odd
+    return small if k == 1 else cv2.GaussianBlur(small, (k, k), 0)
 
 
 def make_preview(rgb: np.ndarray, mask: np.ndarray, overlay: bool) -> np.ndarray:
@@ -1591,6 +1618,7 @@ class St:
     andv: int = 0
     gate: int = 0
     y_bin: int = 1
+    y_idx: int = 0
     Q: int = 0
 
 
@@ -1635,14 +1663,17 @@ class SimThread(threading.Thread):
                     qb.task_done()
                     return
                 st.c_of_x = int(p.motion and p.x > 2 and p.x % 2 == 1)
+                vs_, vbe_, vih_ = (float(ctl.get("vs", VS)), float(ctl.get("vbe", V_BE)),
+                                   float(ctl.get("vih", V_IH)))
+                rc_ = max(1e-5, float(ctl.get("rc_ms", RC_B * 1000)) / 1000.0)
                 traj, n = [], 24
                 for j in range(n + 1):                 # C charges from 0 each frame
                     t = p.dt * j / n
-                    vC = VS * (1 - math.exp(-t / RC_B)) if st.c_of_x else 0.0
-                    traj.append((t * 1000, vC, max(0.0, vC - V_BE)))
+                    vC = vs_ * (1 - math.exp(-t / rc_)) if st.c_of_x else 0.0
+                    traj.append((t * 1000, vC, max(0.0, vC - vbe_)))
                 st.traj = traj
                 st.vC, st.vB = traj[-1][1], traj[-1][2]
-                st.B = int(st.vB >= V_IH)
+                st.B = int(st.vB >= vih_)
                 qb.task_done()
 
         async def clock_ff():                          # gates, node, Y, 74HC74
@@ -1654,13 +1685,14 @@ class SimThread(threading.Thread):
                 st.orv = st.A | st.B
                 st.andv = st.A & st.B
                 st.gate = st.orv & st.andv                       # tied -> AND
-                st.node = st.gate * (1 - math.exp(-p.dt / beta_tau))   # 10 uF node
-                y = ctl["y"]
+                tau = max(1e-5, float(ctl.get("tau_ms", beta_tau * 1000)) / 1000.0)
+                st.node = st.gate * (1 - math.exp(-p.dt / tau))        # 10 uF node
+                bit, st.y_idx = y_bin_at(ctl, p.idx, time.perf_counter() - t_start)
                 added = 1 if ctl.get("timecode_pending", 0) > 0 else 0
-                st.y_bin = int(y[p.idx % len(y)]) | added
+                st.y_bin = bit | added
                 if added:                                # one found number = one added bin
                     ctl["timecode_pending"] -= 1
-                d_in = int(st.node > 0.5)
+                d_in = int(st.node > float(ctl.get("node_thr", 0.5)))
                 if ctl.get("force"):                             # Y OR-ed in (Thm 4 demo)
                     st.Q = d_in | st.y_bin
                 else:                                            # Y gates the result
@@ -1718,6 +1750,8 @@ class SimThread(threading.Thread):
         prev = None
         prev_even = False                  # was the previous frame an even state?
         t_prev = time.perf_counter()
+        t_start = t_prev                   # wall-clock origin for 'ms' time-code bins
+        ctl["fps_est"] = None
         idx = 0
         recent_q = deque(maxlen=60)
         try:
@@ -1729,10 +1763,12 @@ class SimThread(threading.Thread):
                 now = time.perf_counter()
                 dt = min(max(now - t_prev, 1e-3), 0.25)
                 t_prev = now
+                f_inst = 1.0 / dt
+                ctl["fps_est"] = f_inst if ctl.get("fps_est") is None else 0.9 * ctl["fps_est"] + 0.1 * f_inst
 
                 # ---- motion detection
-                small = downscale(gray)
-                if prev is None or idx < WARMUP:
+                small = downscale(gray, ctl.get("blur", 5))
+                if prev is None or idx < int(ctl.get("warmup", WARMUP)):
                     diff = np.zeros((SH, SW), np.int16)
                     mask = np.zeros((SH, SW), bool)
                 else:
@@ -1770,7 +1806,7 @@ class SimThread(threading.Thread):
                 # BTC high/low oracle: one armed release is consumed on the next even state.
                 if even_now and ctl.get("btc_release_armed", False):
                     ctl["btc_release_armed"] = False
-                    ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                    ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
                     S["btc_timecodes"] = S.get("btc_timecodes", 0) + 1
                     ctl["btc_released"] = ctl.get("btc_released", 0) + 1
                     S["timecodes_added"] = S.get("timecodes_added", 0) + 1
@@ -1788,7 +1824,7 @@ class SimThread(threading.Thread):
                 if hidden is not None and ctl.get("hidden_on", True) and even_state:
                     hidden_hit = hidden.spot_check()
                     if hidden_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
                         S["hidden_timecodes"] += 1
                         S["timecodes_added"] += 1
                         out.put(("hidden_hit", dict(frame=idx, x=x, time=time.time(),
@@ -1801,7 +1837,7 @@ class SimThread(threading.Thread):
                 if search is not None and ctl.get("search_on", True) and even_state:
                     search_hit = search.guess()
                     if search_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
                         S["search_timecodes"] += 1
                         S["timecodes_added"] += 1
                         sn = search.snapshot()
@@ -1817,7 +1853,7 @@ class SimThread(threading.Thread):
                 if fsearch is not None and ctl.get("fsearch_on", True) and even_state:
                     factor_hit = fsearch.guess()
                     if factor_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + 1
+                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
                         S["factor_timecodes"] += 1
                         S["timecodes_added"] += 1
                         fn = fsearch.snapshot()
@@ -1869,7 +1905,7 @@ class SimThread(threading.Thread):
                     mask=mask, energy=energy, A=st.A, r=st.r, B=st.B,
                     c_of_x=st.c_of_x, vC=st.vC, vB=st.vB, traj=st.traj,
                     node=st.node, orv=st.orv, andv=st.andv, gate=st.gate,
-                    y_bin=st.y_bin, Q=st.Q, select=select, stats=dict(S),
+                    y_bin=st.y_bin, y_idx=st.y_idx, Q=st.Q, select=select, stats=dict(S),
                     hidden_hit=hidden_hit, search_hit=search_hit, factor_hit=factor_hit)))
                 idx += 1
         finally:
@@ -2205,6 +2241,7 @@ class App:
                         overlay=True, force=False,
                         timecode_pending=0,
                         hidden_on=True, search_on=True)
+        self.ctl.update(TUNE_DEFAULTS)
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
         self.hidden.start()
         self.ctl["hidden"] = self.hidden
@@ -2332,6 +2369,56 @@ class App:
         scale("min moving px", "min_px", 5, 800, 30)
         scale("k frames", "k", 1, 30, 5)
 
+        f3 = ttk.LabelFrame(outer, text="Time code tuning (live)")
+        f3.pack(anchor="w", fill="x", pady=(6, 0))
+        f4 = ttk.LabelFrame(outer, text="Circuit / detector tuning (live)")
+        f4.pack(anchor="w", fill="x", pady=(4, 0))
+        self.tune_vars = {}
+
+        def spin(parent, label, key, lo, hi, step, integer, width=6):
+            ttk.Label(parent, text=label).pack(side="left", padx=(6, 1))
+            default = TUNE_DEFAULTS[key]
+            var = tk.StringVar(value=str(int(default) if integer else round(default, 4)))
+            self.tune_vars[key] = (var, default, integer)
+
+            def changed(*_):
+                try:
+                    v = float(var.get())
+                except ValueError:
+                    return                                   # half-typed: keep the last good value
+                v = min(max(v, lo), hi)
+                self.ctl[key] = int(round(v)) if integer else v
+                self._refresh_analysis()
+            var.trace_add("write", changed)
+            ttk.Spinbox(parent, from_=lo, to=hi, increment=step, width=width,
+                        textvariable=var).pack(side="left")
+
+        spin(f3, "frames per bin", "bin_w", 1, 120, 1, True, 4)
+        spin(f3, "phase (start bin)", "phase", 0, 255, 1, True, 4)
+        ttk.Label(f3, text="clock:").pack(side="left", padx=(10, 1))
+        self.v_clock = tk.StringVar(value="frames")
+        cb = ttk.Combobox(f3, textvariable=self.v_clock, values=("frames", "ms"), width=7,
+                          state="readonly")
+        cb.pack(side="left")
+        cb.bind("<<ComboboxSelected>>",
+                lambda _e: (self.ctl.update(clock=self.v_clock.get()), self._refresh_analysis()))
+        spin(f3, "ms per bin", "bin_ms", 5, 5000, 5, False, 6)
+        self.v_invert = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f3, text="invert Y", variable=self.v_invert,
+                        command=lambda: (self.ctl.update(invert=self.v_invert.get()),
+                                         self._refresh_analysis())).pack(side="left", padx=(10, 0))
+        spin(f3, "bins added per find", "bins_per_hit", 1, 20, 1, True, 3)
+
+        spin(f4, "RC (ms)", "rc_ms", 0.1, 100, 0.5, False, 6)
+        spin(f4, "node tau (ms)", "tau_ms", 0.1, 100, 0.5, False, 6)
+        spin(f4, "node thr", "node_thr", 0.05, 0.95, 0.05, False, 5)
+        spin(f4, "Vs", "vs", 1.0, 15.0, 0.1, False, 5)
+        spin(f4, "V_BE", "vbe", 0.0, 2.0, 0.05, False, 5)
+        spin(f4, "V_IH", "vih", 0.5, 12.0, 0.1, False, 5)
+        spin(f4, "warm-up frames", "warmup", 0, 200, 1, True, 4)
+        spin(f4, "blur kernel", "blur", 1, 31, 2, True, 3)
+        ttk.Button(f4, text="Reset tuning", command=self._reset_tuning).pack(side="left", padx=10)
+
         ttk.Label(f2, text="Time code Y:").pack(side="left")
         self.e_y = ttk.Entry(f2, width=22)
         self.e_y.insert(0, "1111")
@@ -2358,6 +2445,14 @@ class App:
         ttk.Checkbutton(f, text="show motion", variable=self.v_ov,
                         command=lambda: self.ctl.update(overlay=self.v_ov.get())
                         ).pack(side="left", padx=8)
+
+    def _reset_tuning(self):
+        for key, (var, default, integer) in self.tune_vars.items():
+            var.set(str(int(default) if integer else round(default, 4)))
+        self.v_clock.set("frames")
+        self.v_invert.set(False)
+        self.ctl.update(clock="frames", invert=False)
+        self._refresh_analysis()
 
     def _btc_panel(self):
         self._btc_stop = None
@@ -2905,9 +3000,18 @@ class App:
         """Show what the time code does to the error bound (Thm 1-4)."""
         if not hasattr(self, "analysis"):
             return
-        Y, k = self.ctl["y"], self.ctl["k"]
+        k = self.ctl["k"]
+        Y0 = self.ctl["y"]
+        Y = effective_code(self.ctl)
         m, ones = len(Y), Y.count("1")
-        L = [f"Time code Y = {Y}   open {ones}/{m}  (density {ones / m:.2f})"]
+        L = [f"Time code Y = {Y0}   open {ones}/{m}  (density {ones / m:.2f})"]
+        if self.ctl.get("clock") == "ms":
+            L.append(f"bins of {self.ctl['bin_ms']:g} ms  (~{m // max(1, len(Y0))} frames/bin at "
+                     f"{(self.ctl.get('fps_est') or 30):.0f} fps)")
+        elif self.ctl.get("bin_w", 1) > 1:
+            L.append(f"each bin lasts {self.ctl['bin_w']} frames")
+        if self.ctl.get("phase") or self.ctl.get("invert"):
+            L.append(f"phase {self.ctl.get('phase', 0)}" + ("  inverted" if self.ctl.get("invert") else ""))
         ci = self.code_info
         if ci["carries"]:
             L.append(f"integer add: {ci['carries']} carry(ies), each loses one open bin (Thm 3c)")
@@ -3039,23 +3143,29 @@ class App:
 
     def _draw_traj(self):
         p = self.plot1
-        key = ("traj", id(self.last_traj), len(self.last_traj), round(self.ctl["min_px"]))
+        key = ("traj", id(self.last_traj), len(self.last_traj), round(self.ctl["min_px"]),
+               self.ctl["vs"], self.ctl["vbe"], self.ctl["vih"], self.ctl["rc_ms"])
         if self._photo_cache.get("traj_key") == key:
             return
         self._photo_cache["traj_key"] = key
         p.delete("all")
         W, H, m = 420, 170, 28
         top, bot = 8, H - 20
-        sy = lambda v: bot - v / 5.3 * (bot - top)
-        for v in range(6):
+        vs_, vbe_, vih_ = self.ctl["vs"], self.ctl["vbe"], self.ctl["vih"]
+        vmax = max(vs_, 5.0) * 1.06
+        sy = lambda v: bot - v / vmax * (bot - top)
+        for v in range(int(vmax) + 1):
             p.create_line(m, sy(v), W - 6, sy(v), fill="#eee")
             p.create_text(14, sy(v), text=str(v), font=("Arial", 7))
-        for v, col, lab in ((V_BE, "#888", "0.7 V NPN on"), (V_IH, "#c33", "3.5 V logic HIGH")):
+        for v, col, lab in ((vbe_, "#888", f"{vbe_:g} V NPN on"), (vih_, "#c33", f"{vih_:g} V logic HIGH")):
             p.create_line(m, sy(v), W - 6, sy(v), fill=col, dash=(4, 3))
             p.create_text(W - 8, sy(v) - 6, text=lab, anchor="e", font=("Arial", 7), fill=col)
         tr = self.last_traj
         if len(tr) > 1:
             tmax = tr[-1][0]
+            head = vs_ - vih_ - vbe_
+            lt_txt = (f"{self.ctl['rc_ms'] * math.log(vs_ / head):.1f} ms" if head > 0
+                      else "never (Vs - V_BE < V_IH)")
             sx = lambda t: m + t / tmax * (W - m - 6)
             for k, col, lab in ((1, "#1f6fb5", "V(C)"), (2, "#2a9d3a", "V(B)")):
                 pts = []
@@ -3064,7 +3174,7 @@ class App:
                 p.create_line(*pts, fill=col, width=2)
             p.create_text(m + 6, H - 8, text="\u25cf V(C)", anchor="w", fill="#1f6fb5", font=("Arial", 8))
             p.create_text(m + 70, H - 8, text="\u25cf V(B)", anchor="w", fill="#2a9d3a", font=("Arial", 8))
-            p.create_text(W - 8, H - 8, text=f"frame period {tmax:.0f} ms; 1.83RC = {LOGIC_TIME*1000:.1f} ms",
+            p.create_text(W - 8, H - 8, text=f"frame period {tmax:.0f} ms; time to logic HIGH = {lt_txt}",
                           anchor="e", font=("Arial", 8), fill="#555")
 
     def _draw_x(self):
@@ -3239,9 +3349,9 @@ class App:
         self._lit("link", d["B"], f"V(C)={d['vC']:.2f}  V(B)={d['vB']:.2f}", GOOD)
         self._lit("or", d["orv"])
         self._lit("and", d["andv"])
-        self._lit("node", d["node"] > 0.5, f"{d['node']:.2f}")
+        self._lit("node", d["node"] > self.ctl.get("node_thr", 0.5), f"{d['node']:.2f}")
         self._lit("Y", d["y_bin"],
-                  f"[{self.ctl['y']}]  bin {d['idx'] % len(self.ctl['y'])}={d['y_bin']}"
+                  f"[{self.ctl['y']}]  bin {d['y_idx']}={d['y_bin']}"
                   + (" +HIDDEN" if d.get("hidden_hit") else "")
                   + (" +SEARCH" if d.get("search_hit") else "")
                   + (" +FACTOR" if d.get("factor_hit") else ""))
@@ -3254,8 +3364,8 @@ class App:
         self._wire_state("A", d["A"])
         self._wire_state("B", d["B"])
         self._wire_state("gate", d["gate"])
-        self._wire_state("node", d["node"] > 0.5)
-        self._wire_state("D", d["node"] > 0.5 and d["y_bin"])
+        self._wire_state("node", d["node"] > self.ctl.get("node_thr", 0.5))
+        self._wire_state("D", d["node"] > self.ctl.get("node_thr", 0.5) and d["y_bin"])
 
         S = d["stats"]
         if d["select"]:
