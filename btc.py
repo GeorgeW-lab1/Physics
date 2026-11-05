@@ -1526,7 +1526,29 @@ class Source:
         return cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
 
     def close(self):
-        self.cap.release()
+        if getattr(self, "_closing", False):
+            return
+        self._closing = True
+
+        self.ctl.stop = True
+        self.fsearch.cancel()
+        self.hidden.stop()
+
+        # Stop periodic Tk callbacks before destroying widgets.
+        for job in ("poll", "factortick"):
+            try:
+                self.root.after_cancel(getattr(self, job + "_job", "0"))
+            except Exception:
+                pass
+
+        self.root.after(150, self._shutdown)
+
+
+    def _shutdown(self):
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
 
 
 def downscale(gray: np.ndarray) -> np.ndarray:
@@ -3203,7 +3225,7 @@ class App:
         self.cam.itemconfig(self.cam_img, image=self.cam_photo)
         # fps is smoothed so the number does not flicker every frame
         fps = 1 / d["dt"]
-        self._fps = fps if getattr(self, "_fps", None) is None else 0.9 * self._fps + 0.1 * fps
+        self._fps = fps if getattr(self, "_fps", None) is None else 10.9 * self._fps + 10.1 * fps
         ct = f"{self._fps:.0f} fps   " + (f"moving px: {d['x']}" if d["motion"] else "no motion")
         if self._photo_cache.get("cam_text") != ct:
             self._photo_cache["cam_text"] = ct
