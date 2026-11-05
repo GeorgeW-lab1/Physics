@@ -1869,9 +1869,13 @@ MINER_INTERVAL = 0.2               # s between miner panel refreshes
 
 
 class BitcoinHighLowOracle:
-    """Live BTC/USD price, higher/lower game, periodic driver verification, and time codes."""
+    """Live BTC/USDT price from Binance, HIGH/LOW calls, delayed time-code release, and logs.
 
-    URL = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    Binance's public ticker endpoint is used because it is designed for much higher
+    request rates than CoinGecko's free tier. The drivers still verify every response.
+    """
+
+    URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
 
     def __init__(self):
         self.last_price = None
@@ -1881,21 +1885,24 @@ class BitcoinHighLowOracle:
         self.last_update = None
         self.pending_guess = None
         self.pending_price = None
+        self.last_prediction = None
         self.correct = 0
         self.total = 0
         self.fresh_count = 0
         self.factual_count = 0
         self.rejected_count = 0
+        self.released_count = 0
+        self.awaiting_release = False
+        self.release_due_at = None
         self._lock = threading.Lock()
 
     @staticmethod
     def _driver_b_checks(raw: bytes, data: dict, price) -> dict:
-        """Deterministic checks: response exists, schema is correct, price is sane."""
         checks = {
             "payload_nonempty": isinstance(raw, bytes) and len(raw) > 0,
             "json_object": isinstance(data, dict),
-            "bitcoin_key": isinstance(data, dict) and "bitcoin" in data,
-            "usd_key": isinstance(data, dict) and isinstance(data.get("bitcoin"), dict) and "usd" in data["bitcoin"],
+            "symbol_key": isinstance(data, dict) and data.get("symbol") == "BTCUSDT",
+            "price_key": isinstance(data, dict) and "price" in data,
             "price_numeric": isinstance(price, (int, float)) and not isinstance(price, bool),
             "price_finite": isinstance(price, (int, float)) and math.isfinite(float(price)),
             "price_positive": isinstance(price, (int, float)) and float(price) > 0,
@@ -1905,11 +1912,9 @@ class BitcoinHighLowOracle:
 
     @staticmethod
     def _driver_a_check(raw: bytes) -> dict:
-        """Randomized integrity witness derived from the exact response bytes."""
         digest = hashlib.sha256(raw).digest()
         x = int.from_bytes(digest[:8], "big") | 1
         base = int.from_bytes(digest[8:12], "big") % max(2, x - 2) + 2 if x > 3 else 2
-
         composite = is_odd_composite(x)
         witness = miller_rabin_witness(base, x) if composite else False
         checks = {
@@ -1921,13 +1926,12 @@ class BitcoinHighLowOracle:
 
     def fetch_price(self):
         request = urllib.request.Request(
-            self.URL,
-            headers={"User-Agent": "rp-circuit-btc-oracle/1.0"}
+            self.URL, headers={"User-Agent": "rp-circuit-btc-oracle/1.0"}
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
         data = json.loads(raw.decode())
-        price = float(data["bitcoin"]["usd"])
+        price = float(data["price"])
 
         b_checks = self._driver_b_checks(raw, data, price)
         a_checks = self._driver_a_check(raw)
@@ -1939,21 +1943,23 @@ class BitcoinHighLowOracle:
             self.last_hash = a_checks["digest"]
             self.last_factual = factual
             self.last_checks = {
-                "driver_a": a_checks,
-                "driver_b": b_checks,
-                "factual": factual,
-                "changed": changed,
+                "driver_a": a_checks, "driver_b": b_checks,
+                "factual": factual, "changed": changed,
             }
             self.last_update = time.time()
             self.fresh_count += 1
             if factual:
                 self.factual_count += 1
+                self.awaiting_release = True
             else:
                 self.rejected_count += 1
+                self.awaiting_release = False
+                self.release_due_at = None
 
-        result = None
+        prediction_result = None
         if self.pending_guess is not None and self.pending_price is not None:
             went_up = price > self.pending_price
+            actual_direction = "HIGH" if went_up else "LOW"
             is_correct = (
                 (self.pending_guess == "higher" and went_up) or
                 (self.pending_guess == "lower" and not went_up)
@@ -1961,16 +1967,43 @@ class BitcoinHighLowOracle:
             self.total += 1
             if is_correct:
                 self.correct += 1
-            result = {
-                "guess": self.pending_guess,
+            prediction_result = {
+                "guess": self.pending_guess.upper(),
                 "previous": self.pending_price,
                 "actual": price,
+                "actual_direction": actual_direction,
                 "correct": is_correct,
             }
 
+        next_guess = "higher" if (int(price * 100) % 2 == 0) else "lower"
+        self.pending_guess = next_guess
         self.pending_price = price
-        self.pending_guess = None
-        return price, result, factual, changed
+        self.last_prediction = {
+            "guess": next_guess.upper(),
+            "made_at_price": price,
+        }
+        return price, prediction_result, factual, changed
+
+    def set_release_delay(self, seconds):
+        with self._lock:
+            if self.awaiting_release:
+                self.release_due_at = time.time() + max(0.0, float(seconds))
+
+    def due_for_release(self):
+        with self._lock:
+            return (
+                self.awaiting_release and self.release_due_at is not None and
+                time.time() >= self.release_due_at
+            )
+
+    def mark_released(self):
+        with self._lock:
+            if self.awaiting_release:
+                self.awaiting_release = False
+                self.release_due_at = None
+                self.released_count += 1
+                return True
+            return False
 
     def guess(self, direction):
         if direction not in ("higher", "lower"):
@@ -1979,6 +2012,7 @@ class BitcoinHighLowOracle:
             self.fetch_price()
         self.pending_guess = direction
         self.pending_price = self.last_price
+        self.last_prediction = {"guess": direction.upper(), "made_at_price": self.last_price}
 
 
 class ScrollFrame(ttk.Frame):
@@ -2050,7 +2084,7 @@ class ScrollFrame(ttk.Frame):
 class App:
     def __init__(self, window):
         self.window = window                          # the real Tk window
-        window.title("RP circuit + hidden number, bit search and periodic Bitcoin oracle")
+        window.title("RP circuit + hidden number, bit search and Binance Bitcoin HIGH/LOW releases")
         self.scroller = ScrollFrame(window)
         self.scroller.pack(fill="both", expand=True)
         root = self.scroller.inner                    # every widget below lives in here
@@ -2076,6 +2110,7 @@ class App:
         self.btc = BitcoinHighLowOracle()
         self.photos = [None, None, None]
         self.btc_auto_job = None
+        self.btc_release_job = None
         self.btc_auto_running = False
         self.q_hist = deque(maxlen=84)          # (Q, y_bin, motion)
         self.x_hist = deque(maxlen=150)
@@ -2222,126 +2257,172 @@ class App:
     def _btc_panel(self):
         panel = ttk.LabelFrame(
             self.root,
-            text="Bitcoin oracle — periodic driver checks and automatic time-code release"
+            text="Bitcoin oracle — Binance BTC/USDT, HIGH/LOW after each check and release"
         )
         panel.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
-        self.btc_price_var = tk.StringVar(value="BTC/USD: --")
+        self.btc_price_var = tk.StringVar(value="BTC/USDT: --")
         ttk.Label(panel, textvariable=self.btc_price_var,
                   font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=8, pady=6)
 
-        ttk.Button(panel, text="Check now",
-                   command=self.btc_refresh).pack(side="left", padx=4)
+        ttk.Button(panel, text="Check now", command=self.btc_refresh).pack(side="left", padx=4)
 
-        ttk.Button(panel, text="Next: higher",
-                   command=lambda: self.btc_guess("higher")).pack(side="left", padx=4)
+        self.btc_call_var = tk.StringVar(value="After next check: --")
+        ttk.Label(panel, textvariable=self.btc_call_var,
+                  font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=10)
 
-        ttk.Button(panel, text="Next: lower",
-                   command=lambda: self.btc_guess("lower")).pack(side="left", padx=4)
+        self.btc_period_var = tk.StringVar(value="10")
+        ttk.Label(panel, text="Check every").pack(side="left", padx=(12, 2))
+        ttk.Spinbox(panel, from_=1, to=3600, width=5, textvariable=self.btc_period_var).pack(side="left")
+        ttk.Label(panel, text="s").pack(side="left", padx=(2, 8))
 
-        self.btc_period_var = tk.StringVar(value="30")
-        ttk.Label(panel, text="Every").pack(side="left", padx=(12, 2))
-        ttk.Spinbox(panel, from_=5, to=3600, width=5,
-                    textvariable=self.btc_period_var).pack(side="left")
-        ttk.Label(panel, text="s").pack(side="left", padx=(2, 6))
+        self.btc_delay_var = tk.StringVar(value="10")
+        ttk.Label(panel, text="Release after").pack(side="left", padx=(0, 2))
+        ttk.Spinbox(panel, from_=0, to=3600, width=5, textvariable=self.btc_delay_var).pack(side="left")
+        ttk.Label(panel, text="s").pack(side="left", padx=(2, 8))
 
         self.btc_auto_var = tk.BooleanVar(value=False)
-        self.btc_auto_button = ttk.Checkbutton(
-            panel, text="Auto-check", variable=self.btc_auto_var,
-            command=self.btc_toggle_auto
-        )
-        self.btc_auto_button.pack(side="left", padx=4)
+        ttk.Checkbutton(panel, text="Auto-check", variable=self.btc_auto_var,
+                        command=self.btc_toggle_auto).pack(side="left", padx=4)
 
         self.btc_result_var = tk.StringVar(
-            value="Auto-check is off. Turn it on to periodically fetch, driver-verify, and release time codes."
+            value="Auto-check off. Uses Binance BTC/USDT for higher request rates; each release states HIGH or LOW after the next check."
         )
-        ttk.Label(panel, textvariable=self.btc_result_var, wraplength=720).pack(
+        ttk.Label(panel, textvariable=self.btc_result_var, wraplength=700).pack(
             side="left", padx=12, pady=6, fill="x", expand=True
         )
 
     def btc_toggle_auto(self):
         if self.btc_auto_var.get():
             self.btc_auto_running = True
+            self._log("BTC oracle: automatic Binance BTC/USDT checking enabled.")
             self.btc_refresh()
             self.btc_schedule_auto()
         else:
             self.btc_auto_running = False
-            if self.btc_auto_job is not None:
-                try:
-                    self.root.after_cancel(self.btc_auto_job)
-                except Exception:
-                    pass
-                self.btc_auto_job = None
-            self.btc_result_var.set("Auto-check stopped. No further time codes will be released.")
+            for job in (self.btc_auto_job, self.btc_release_job):
+                if job is not None:
+                    try: self.root.after_cancel(job)
+                    except Exception: pass
+            self.btc_auto_job = None
+            self.btc_release_job = None
+            self._log("BTC oracle: automatic checking disabled; pending release cancelled.")
+            self.btc_result_var.set("Auto-check stopped. No further HIGH/LOW calls or time codes.")
 
     def btc_schedule_auto(self):
-        if not self.btc_auto_running:
-            return
-        try:
-            seconds = max(5, int(float(self.btc_period_var.get())))
-        except Exception:
-            seconds = 30
+        if not self.btc_auto_running: return
+        try: seconds = max(1, int(float(self.btc_period_var.get())))
+        except Exception: seconds = 10
         self.btc_auto_job = self.root.after(seconds * 1000, self.btc_auto_tick)
 
     def btc_auto_tick(self):
-        if not self.btc_auto_running:
-            return
+        if not self.btc_auto_running: return
         self.btc_refresh()
         self.btc_schedule_auto()
 
     def btc_refresh(self):
         try:
             price, result, factual, changed = self.btc.fetch_price()
-            self.btc_price_var.set(f"BTC/USD: ${price:,.2f}")
-
-            if factual:
-                # Release one time-code bin to the circuit. The frame loop consumes
-                # it on the next processed frame, where Driver A/B/Y gate it.
-                self.ctl["timecode_pending"] = self.ctl.get("timecode_pending", 0) + 1
-                timecode_text = "time-code RELEASED to circuit"
-            else:
-                timecode_text = "time-code WITHHELD"
+            self.btc_price_var.set(f"BTC/USDT: ${price:,.2f}")
+            call = self.btc.last_prediction["guess"]
+            self.btc_call_var.set(
+                f"After next check: {call} "
+                f"(from ${self.btc.last_prediction['made_at_price']:,.2f})"
+            )
 
             checks = self.btc.last_checks
-            a = checks["driver_a"]
-            b = checks["driver_b"]
-            verdict = "FACTUAL" if factual else "NOT FACTUAL"
+            a, b = checks["driver_a"], checks["driver_b"]
             change = "price changed" if changed else "price unchanged"
-            detail = (
-                f"{verdict} ({change}): Driver B={b['driver_b']}, "
-                f"Driver A={a['driver_a']} "
-                f"(hash {a['digest'][:12]}…, x={a['x']}, "
-                f"{'composite' if a['composite'] else 'not odd-composite'}); "
-                f"{timecode_text}; "
-                f"fresh={self.btc.fresh_count}, "
-                f"accepted={self.btc.factual_count}, "
-                f"rejected={self.btc.rejected_count}"
-            )
 
-            if result:
-                outcome = "correct" if result["correct"] else "wrong"
-                detail += (
-                    f" | Guess {result['guess']}: "
-                    f"${result['previous']:,.2f} -> ${result['actual']:,.2f} "
-                    f"({outcome}); record {self.btc.correct}/{self.btc.total}"
+            if factual:
+                try: delay = max(0, int(float(self.btc_delay_var.get())))
+                except Exception: delay = 10
+                self.btc.set_release_delay(delay)
+                self.btc_result_var.set(
+                    f"FACTUAL ({change}); Driver B={b['driver_b']}, Driver A={a['driver_a']}; "
+                    f"after next check: {call}; time code due in {delay}s."
+                )
+                self._log(
+                    f"BTC factual (Binance): ${price:,.2f} ({change}); "
+                    f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; "
+                    f"after next check: {call}; time code scheduled in {delay}s."
+                )
+                if self.btc_release_job is not None:
+                    try: self.root.after_cancel(self.btc_release_job)
+                    except Exception: pass
+                self.btc_release_job = self.root.after(delay * 1000, self.btc_release_timecode)
+            else:
+                self.btc_result_var.set(
+                    f"NOT FACTUAL ({change}); Driver B={b['driver_b']}, "
+                    f"Driver A={a['driver_a']}; time code withheld."
+                )
+                self._log(
+                    f"BTC rejected (Binance): ${price:,.2f} ({change}); "
+                    f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; time code withheld."
                 )
 
-            self.btc_result_var.set(detail)
+            if result:
+                outcome = "CORRECT" if result["correct"] else "WRONG"
+                self._log(
+                    f"BTC CHECK RESULT: previous call {result['guess']}; "
+                    f"price after check was {result['actual_direction']}; "
+                    f"${result['previous']:,.2f} -> ${result['actual']:,.2f}; "
+                    f"{outcome}; record {self.btc.correct}/{self.btc.total}"
+                )
+
+            self._log(
+                f"BTC RELEASE PREVIEW: after the next check, price is expected {call}; "
+                f"baseline ${self.btc.last_prediction['made_at_price']:,.2f}; "
+                f"totals fresh={self.btc.fresh_count}, factual={self.btc.factual_count}, "
+                f"rejected={self.btc.rejected_count}, released={self.btc.released_count}, "
+                f"calls={self.btc.correct}/{self.btc.total}."
+            )
         except Exception as exc:
             self.btc.last_factual = False
-            self.btc_result_var.set(
-                f"Periodic Bitcoin check failed: {exc}; time-code withheld."
-            )
+            self.btc.awaiting_release = False
+            self.btc.release_due_at = None
+            self.btc_result_var.set(f"Binance Bitcoin check failed: {exc}; time code withheld.")
+            self._log(f"Binance BTC check failed: {exc}; time code withheld.")
+
+    def btc_release_timecode(self):
+        self.btc_release_job = None
+        if not self.btc.due_for_release(): return
+
+        self.ctl["timecode_pending"] = self.ctl.get("timecode_pending", 0) + 1
+        self.btc.mark_released()
+        price = self.btc.last_price
+        call = self.btc.last_prediction["guess"] if self.btc.last_prediction else "--"
+        baseline = self.btc.last_prediction["made_at_price"] if self.btc.last_prediction else price
+        self._log(
+            f"BTC TIME-CODE RELEASE: after the next check, price will be {call} "
+            f"relative to ${baseline:,.2f}; release price ${price:,.2f}; "
+            f"pending circuit bins={self.ctl.get('timecode_pending', 0)}."
+        )
+        self.btc_result_var.set(
+            f"Time code released. After the next check, BTC/USDT price is expected {call} "
+            f"relative to ${baseline:,.2f}. "
+            f"Pending circuit bins: {self.ctl.get('timecode_pending', 0)}."
+        )
 
     def btc_guess(self, direction):
         try:
             self.btc.guess(direction)
+            call = self.btc.last_prediction["guess"]
+            self.btc_call_var.set(
+                f"After next check: {call} "
+                f"(from ${self.btc.last_prediction['made_at_price']:,.2f})"
+            )
             self.btc_result_var.set(
-                f"Pending: next BTC/USD price will be {direction} "
-                f"than ${self.btc.pending_price:,.2f}. Press Check now or wait for auto-check."
+                f"Manual call pending: after the next check, BTC/USDT will be {call} "
+                f"relative to ${self.btc.pending_price:,.2f}."
+            )
+            self._log(
+                f"BTC MANUAL CALL: after the next check, price will be {call} "
+                f"relative to ${self.btc.pending_price:,.2f}."
             )
         except Exception as exc:
             self.btc_result_var.set(f"Bitcoin guess failed: {exc}")
+            self._log(f"BTC guess failed: {exc}")
 
     def _miner_panel(self):
         panel = ttk.LabelFrame(self.root, text="Time-code sources")
