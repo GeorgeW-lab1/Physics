@@ -2099,6 +2099,20 @@ class SimThread(threading.Thread):
                 # Higher/lower search: one oracle guess per armed frame (two sequential evens)
                 search_hit = False
                 if search is not None and ctl.get("search_on", True) and even_state:
+                    if ctl.get("inj_last_bit", False) and search.pooled_n == search.bits - 1:
+                        _shift = search.bits - 1 - search.pooled_n
+                        _bit = 1 if (search.secret >> _shift) & 1 else 0
+                        _key = ctl.get("macro_higher", "w") if _bit else ctl.get("macro_lower", "s")
+                        try:
+                            inject_combo(
+                                _key,
+                                shift=True,
+                                hold=float(ctl.get("inj_hold_ms", 40)) / 1000.0,
+                                scan=bool(ctl.get("inj_scan", True)),
+                            )
+                            out.put("info", f"INJECTED Shift+{_key.upper()} for final search bit {_bit}")
+                        except Exception as _exc:
+                            out.put("error", f"final-bit keystroke failed: {_exc}")
                     search_hit = search.guess()
                     if search_hit:
                         ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
@@ -2115,6 +2129,20 @@ class SimThread(threading.Thread):
                 # single final check verifies a correct factorisation (separate source, own counter).
                 factor_hit = False
                 if fsearch is not None and ctl.get("fsearch_on", True) and even_state:
+                    if ctl.get("inj_last_bit", False) and fsearch.pooled_n == fsearch.width - 1:
+                        _shift = fsearch.width - 1 - fsearch.pooled_n
+                        _bit = 1 if (fsearch.secret >> _shift) & 1 else 0
+                        _key = ctl.get("macro_higher", "w") if _bit else ctl.get("macro_lower", "s")
+                        try:
+                            inject_combo(
+                                _key,
+                                shift=True,
+                                hold=float(ctl.get("inj_hold_ms", 40)) / 1000.0,
+                                scan=bool(ctl.get("inj_scan", True)),
+                            )
+                            out.put("info", f"INJECTED Shift+{_key.upper()} for final factor bit {_bit}")
+                        except Exception as _exc:
+                            out.put("error", f"final-bit keystroke failed: {_exc}")
                     factor_hit = fsearch.guess()
                     if factor_hit:
                         ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
@@ -2236,7 +2264,7 @@ class BitcoinHighLowOracle:
     fetch_sample() does network I/O: call it from a worker thread only.
     """
 
-    URL = "https://api.binance.com/api/v3/ticker/price?symbol=DOGEUSDT"
+    URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     MAX_DEPTH = 8
     MIN_OBS = 3
 
@@ -2319,7 +2347,7 @@ class BitcoinHighLowOracle:
         checks = {
             "payload_nonempty": isinstance(raw, bytes) and len(raw) > 0,
             "json_object": isinstance(data, dict),
-            "symbol_key": isinstance(data, dict) and data.get("symbol") == "DOGEUSDT",
+            "symbol_key": isinstance(data, dict) and data.get("symbol") == "BTCUSDT",
             "price_key": isinstance(data, dict) and "price" in data,
             "price_numeric": isinstance(price, (int, float)) and not isinstance(price, bool),
             "price_finite": isinstance(price, (int, float)) and math.isfinite(float(price)),
@@ -2582,6 +2610,13 @@ class App:
                         timecode_pending=0,
                         hidden_on=True, search_on=True)
         self.ctl.update(TUNE_DEFAULTS)
+        self.ctl.update(
+            inj_last_bit=False,
+            macro_higher="w",
+            macro_lower="s",
+            inj_hold_ms=40,
+            inj_scan=True,
+        )
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
         self.hidden.start()
         self.ctl["hidden"] = self.hidden
@@ -2971,6 +3006,19 @@ class App:
         ttk.Checkbutton(row4, text="only when the call changes", variable=self.v_inj_change,
                         command=lambda: self.inj.update(change_only=self.v_inj_change.get())
                         ).pack(side="left", padx=4)
+        self.v_inj_lastbit = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row4,
+            text="Shift+W/S on final bit",
+            variable=self.v_inj_lastbit,
+            command=lambda: self.ctl.update(
+                inj_last_bit=self.v_inj_lastbit.get(),
+                macro_higher=self.macro_keys["higher"],
+                macro_lower=self.macro_keys["lower"],
+                inj_hold_ms=self.inj["hold_ms"],
+                inj_scan=self.inj["scan"],
+            ),
+        ).pack(side="left", padx=4)
         self.v_inj_scan = tk.BooleanVar(value=True)
         ttk.Checkbutton(row4, text="scan codes (games)", variable=self.v_inj_scan,
                         command=lambda: self.inj.update(scan=self.v_inj_scan.get())
