@@ -75,6 +75,13 @@ so the successes' bins are interleaved with the failures instead of arriving in 
 side is empty the other drains normally. Every outcome also sends Shift+A (success) or Shift+D
 (failure) to the focused window (keys configurable, same hold / delay / scan / dry-run settings).
 A failure never earns a bin, so the one-sided guarantee is unchanged.
+Bit order: the secret's bits are pooled (and injected) in an interleaved order by default: the two
+halves alternate (MSB, middle, MSB-1, middle-1, ...). 'alternate ends' and plain 'MSB first' are
+selectable. Only MSB first asks the real higher/lower question; in the interleaved orders the oracle
+answers the bit at the requested position directly.
+All injected keys (search / factor bits, timed bits, manual macros, BTC bits, success and
+failure keys) go through ONE dispatcher thread that sends one key at a time, round-robin across the
+sources, so every injection is interleaved with the others (tick off 'interleave ALL' for plain FIFO).
 
 BTC sampler: Binance BTC/USDT samples; the only call is a manual one (Shift+W / Shift+S macro),
 scored once per end-check window. A correct call on a factual sample arms one release, consumed on
@@ -826,6 +833,53 @@ def short_int(n: int, keep: int = 20) -> str:
     return h if len(h) <= 2 * keep + 3 else f"{h[:keep]}...{h[-keep:]} ({len(h) * 4} bit hex)"
 
 
+# ------------------------------------------------------------------ bit order (interleaving)
+BIT_ORDERS = (("interleave halves", "halves"), ("alternate ends", "ends"),
+              ("MSB first (higher/lower)", "msb"))
+_ORDER_CACHE = {}
+
+
+def bit_order(n: int, mode: str):
+    """Shift positions (LSB = 0) in the order the bits of an n-bit secret are pooled.
+    msb     : n-1, n-2, ... 0                      (the plain higher/lower search)
+    halves  : the two halves interleaved           (MSB, middle, MSB-1, middle-1, ...)
+    ends    : alternate high end / low end         (MSB, LSB, MSB-1, LSB+1, ...)"""
+    key = (n, mode)
+    if key in _ORDER_CACHE:
+        return _ORDER_CACHE[key]
+    if mode == "msb":
+        idx = list(range(n))
+    elif mode == "ends":
+        idx, lo, hi = [], 0, n - 1
+        while lo <= hi:
+            idx.append(lo)
+            lo += 1
+            if lo <= hi:
+                idx.append(hi)
+                hi -= 1
+    else:
+        h = (n + 1) // 2
+        idx = []
+        for t in range(h):
+            idx.append(t)
+            if t + h < n:
+                idx.append(t + h)
+    order = [n - 1 - i for i in idx]
+    if len(_ORDER_CACHE) > 32:
+        _ORDER_CACHE.clear()
+    _ORDER_CACHE[key] = order
+    return order
+
+
+def oracle_bit(secret: int, pooled: int, shift: int, mode: str) -> int:
+    """One oracle answer. MSB first it is the real higher/lower question "secret >= trial?".
+    In an interleaved order the higher bits are not all known yet, so the oracle answers
+    the bit at that position directly."""
+    if mode == "msb":
+        return 1 if secret >= (pooled | (1 << shift)) else 0
+    return (secret >> shift) & 1
+
+
 class BinarySearch:
     """A secret integer of `bits` bits and a higher/lower oracle, with POOLED bits.
 
@@ -834,6 +888,8 @@ class BinarySearch:
     that query. Only when all `bits` bits have been pooled is the pooled candidate compared with
     the secret, once. When the final check passes one time-code bin is earned and a new secret
     is hidden."""
+
+    order_mode = "halves"          # see bit_order(); the App changes it
 
     def __init__(self, bits=SEARCH_BITS_DEFAULT):
         self._lock = threading.Lock()
@@ -881,7 +937,7 @@ class BinarySearch:
         with self._lock:
             if self.pooled_n <= 0:
                 return None
-            pos = self.bits - 1 - (self.pooled_n - 1)
+            pos = bit_order(self.bits, self.order_mode)[self.pooled_n - 1]
             self.pooled ^= 1 << pos
             self.last = (f"permaflipped bit {self.pooled_n}/{self.bits}", self.pooled_n)
             return self.pooled
@@ -889,20 +945,19 @@ class BinarySearch:
     def next_bit(self) -> int:
         """The bit the next guess() will pool (used by keystroke injection)."""
         with self._lock:
-            shift = self.bits - 1 - self.pooled_n
+            shift = bit_order(self.bits, self.order_mode)[self.pooled_n]
             return (self._secret >> shift) & 1
 
     def guess(self) -> bool:
         with self._lock:
             self.guesses += 1
             self.round_guesses += 1
-            shift = self.bits - 1 - self.pooled_n
-            trial = self.pooled | (1 << shift)
-            bit = 1 if self._secret >= trial else 0
+            shift = bit_order(self.bits, self.order_mode)[self.pooled_n]
+            bit = oracle_bit(self._secret, self.pooled, shift, self.order_mode)
             self.pooled |= bit << shift
             self.pooled_n += 1
             if self.pooled_n < self.bits:
-                self.last = (f"pooled bit {self.pooled_n}/{self.bits} = {bit}", self.pooled_n)
+                self.last = (f"pooled bit {self.pooled_n}/{self.bits} (position {self.bits - 1 - shift}) = {bit}", self.pooled_n)
                 return False
 
             self.final_checks += 1
@@ -985,6 +1040,8 @@ class FactorSearch:
                   case the typed number itself is the secret and only one equality check runs).
       * generated N : a random semiprime is built and its factors are kept inside the oracle."""
 
+    order_mode = "halves"          # see bit_order(); the App changes it
+
     def __init__(self, pool):
         self._lock = threading.Lock()
         self.pool = pool
@@ -1065,6 +1122,11 @@ class FactorSearch:
                 self.progress = ""
                 self.msgs.append("# factoriser: cancelled")
 
+    def restart_pool(self):
+        """Throw away the pooled bits (used when the bit order changes)."""
+        with self._lock:
+            self.pooled = self.pooled_n = self.round_guesses = 0
+
     def reveal(self):
         with self._lock:
             self.revealed = True
@@ -1075,7 +1137,7 @@ class FactorSearch:
         with self._lock:
             if self.pooled_n <= 0:
                 return None
-            pos = self.width - 1 - (self.pooled_n - 1)
+            pos = bit_order(self.width, self.order_mode)[self.pooled_n - 1]
             self.pooled ^= 1 << pos
             self.last = f"permaflipped bit {self.pooled_n}/{self.width}"
             return self.pooled
@@ -1085,7 +1147,7 @@ class FactorSearch:
         with self._lock:
             if self.state != "ready":
                 return None
-            shift = self.width - 1 - self.pooled_n
+            shift = bit_order(self.width, self.order_mode)[self.pooled_n]
             return (self._secret >> shift) & 1
 
     # ---------------------------------------------------------- typed number
@@ -1214,13 +1276,12 @@ class FactorSearch:
                 return False
             self.guesses += 1
             self.round_guesses += 1
-            shift = self.width - 1 - self.pooled_n
-            trial = self.pooled | (1 << shift)
-            bit = 1 if self._secret >= trial else 0
+            shift = bit_order(self.width, self.order_mode)[self.pooled_n]
+            bit = oracle_bit(self._secret, self.pooled, shift, self.order_mode)
             self.pooled |= bit << shift
             self.pooled_n += 1
             if self.pooled_n < self.width:
-                self.last = f"pooled bit {self.pooled_n}/{self.width} = {bit}"
+                self.last = f"pooled bit {self.pooled_n}/{self.width} (position {self.width - 1 - shift}) = {bit}"
                 return False
             self.final_checks += 1
             c = self.pooled
@@ -1429,6 +1490,101 @@ def inject_combo(key: str, shift: bool = True, hold: float = 0.04, scan: bool = 
     if shift:
         time.sleep(0.01)
         kb.release(Key.shift)
+
+
+# ------------------------------------------------------------------ injection dispatcher
+INJ_SOURCES = ("search", "factor", "btc", "btcbit", "ok", "bad")
+
+
+class InjectionMux:
+    """ONE worker thread sends EVERY injected key, one at a time, so no two sources ever press keys
+    at the same moment. Each source has its own queue:
+        search / factor  per-bit keys (armed frames or timed inject)
+        btc              manual HIGHER / LOWER macros and the test key
+        btcbit           keys for fetched BTC price moves
+        ok / bad         Shift+A on a success, Shift+D on a failure
+    With interleave on, the worker takes one key from each non-empty source in turn (round-robin),
+    so a burst from one source is spread out between the others, and success / failure keys alternate.
+    With interleave off, keys go out in the order they were queued (plain FIFO)."""
+
+    def __init__(self, ctl, say):
+        self.ctl, self.say = ctl, say
+        self._cv = threading.Condition()
+        self._q = {s: deque(maxlen=5000) for s in INJ_SOURCES}
+        self._seq = 0
+        self._last = -1
+        self._stopped = False
+        self.sent = {s: 0 for s in INJ_SOURCES}
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def put(self, source, key, label, extra_delay=0.0):
+        with self._cv:
+            self._seq += 1
+            self._q[source].append((self._seq, key, label, float(extra_delay)))
+            self._cv.notify()
+
+    def pending(self):
+        with self._cv:
+            return {s: len(q) for s, q in self._q.items()}
+
+    def clear(self):
+        with self._cv:
+            for q in self._q.values():
+                q.clear()
+
+    def stop(self):
+        with self._cv:
+            self._stopped = True
+            self._cv.notify_all()
+
+    def _pick(self):                                   # caller holds the lock
+        names = INJ_SOURCES
+        if self.ctl.get("inj_interleave", False):
+            for i in range(1, len(names) + 1):
+                j = (self._last + i) % len(names)
+                if self._q[names[j]]:
+                    self._last = j
+                    return names[j], self._q[names[j]].popleft()
+            return None
+        best = None
+        for s in names:
+            if self._q[s] and (best is None or self._q[s][0][0] < self._q[best][0][0]):
+                best = s
+        return (best, self._q[best].popleft()) if best else None
+
+    def _run(self):
+        while True:
+            with self._cv:
+                picked = self._pick()
+                while picked is None and not self._stopped:
+                    self._cv.wait(0.5)
+                    picked = self._pick()
+                if self._stopped:
+                    return
+            src, (_seq, key, label, extra) = picked
+            ctl = self.ctl
+            if ctl.get("inj_dry_run", False):
+                self.say(f"DRY RUN [{src}]: would send Shift+{key.upper()} ({label})")
+                continue
+            err = injection_backend_error()
+            if err:
+                self.say(f"[{src}] key skipped: {err}")
+                continue
+            delay = extra + max(0.0, float(ctl.get("inj_delay_ms", 0))) / 1000.0
+            hold = float(ctl.get("inj_hold_ms", 40)) / 1000.0
+            ctl["inj_guard_until"] = time.time() + delay + hold + 0.6     # our own window ignores it
+            try:
+                if delay:
+                    time.sleep(delay)
+                inject_combo(key, True, hold, bool(ctl.get("inj_scan", True)))
+                self.sent[src] += 1
+                self.say(f"INJECTED [{src}] Shift+{key.upper()} ({label})")
+            except Exception as exc:
+                self.say(f"[{src}] inject failed: {exc}")
+            gap = max(0.0, float(ctl.get("inj_gap_ms", 0))) / 1000.0
+            if gap:
+                time.sleep(gap)
 
 
 # ------------------------------------------------------------------ tunable variables
@@ -1942,24 +2098,13 @@ class SimThread(threading.Thread):
         AN = DriverAnalysis()
 
         async def inject_bit(kind, bit):
-            """Send the macro key for one secret bit to the focused window. Runs without
-            blocking the frame loop (sleep and key press are off the event loop)."""
+            """Queue the macro key for one secret bit on the shared injection dispatcher
+            (it sends keys one at a time, interleaved with every other source)."""
             key = (ctl.get(f"macro_{kind}_higher", "w") if bit
                    else ctl.get(f"macro_{kind}_lower", "s"))
-            if ctl.get("inj_dry_run", False):
-                out.put(("info", f"DRY RUN: would send Shift+{key.upper()} for {kind} bit {bit}"))
-                return
-            delay = max(0.0, float(ctl.get("inj_delay_ms", 0))) / 1000.0
-            hold = float(ctl.get("inj_hold_ms", 40)) / 1000.0
-            ctl["inj_guard_until"] = time.time() + delay + hold + 0.6   # our own window ignores it
-            try:
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                await asyncio.to_thread(inject_combo, key, True, hold,
-                                        bool(ctl.get("inj_scan", True)))
-                out.put(("info", f"INJECTED Shift+{key.upper()} for {kind} bit {bit}"))
-            except Exception as exc:
-                out.put(("info", f"bit keystroke failed: {exc}"))
+            mux = ctl.get("inj_mux")
+            if mux is not None:
+                mux.put(kind, key, f"{kind} bit {bit}")
 
         # Shared statistics. Defined BEFORE the tasks so it never races the closures.
         S = dict(frames=0, motion=0, in_L=0, acc_in_L=0, false_acc=0, accepts=0,
@@ -2461,7 +2606,6 @@ class App:
         self.inj = dict(manual=False, change_only=False, scan=True, delay_ms=0, hold_ms=40)
         self._inject_guard_until = 0.0
         self._last_injected = None
-        self._inj_lock = threading.Lock()             # serialises outcome key presses
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
                         timecode_pending=0,
@@ -2484,6 +2628,7 @@ class App:
             macro_factor_lower="s",
             out_ok=0, out_bad=0, out_turn=0,
             inj_outcome=True, macro_ok="a", macro_fail="d",
+            inj_interleave=True, inj_gap_ms=0,
         )
         self.ctl["outcome_cb"] = self._inject_outcome
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
@@ -2520,6 +2665,8 @@ class App:
         self._controls()
         self._miner_panel()
         self._btc_panel()
+        self.mux = InjectionMux(self.ctl, lambda t: self._btc_q.put(("inj", t)))
+        self.ctl["inj_mux"] = self.mux
         self.c = tk.Canvas(root, width=710, height=410, bg="white",
                            highlightthickness=1, highlightbackground="#bbb")
         self.c.grid(row=1, column=0, padx=6, pady=4)
@@ -2943,6 +3090,26 @@ class App:
             var.trace_add("write", lambda *_a, v=var, k=key: self._inj_key_changed(v, k))
         ttk.Label(row7, text="  (successes' time-code bins are interleaved with failures, one token per frame)",
                   foreground="#666").pack(side="left", padx=(8, 0))
+        row8 = ttk.Frame(panel)
+        row8.pack(fill="x", padx=4, pady=(0, 4))
+        self.v_inj_inter = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row8, text="interleave ALL BITS (search / factor, one bit per tick, round-robin; "
+                                   "other injections stay FIFO)",
+                        variable=self.v_inj_inter,
+                        command=lambda: self.ctl.update(inj_interleave=self.v_inj_inter.get())
+                        ).pack(side="left", padx=(8, 4))
+        ttk.Label(row8, text="gap between keys ms").pack(side="left", padx=(8, 1))
+        self.v_inj_gap = tk.StringVar(value="0")
+        ttk.Spinbox(row8, from_=0, to=10000, increment=10, width=6,
+                    textvariable=self.v_inj_gap).pack(side="left")
+        self.v_inj_gap.trace_add("write", lambda *_: self._inj_gap_changed())
+        ttk.Button(row8, text="Clear queued keys", command=lambda: self.mux.clear()).pack(side="left", padx=10)
+        ttk.Label(row8, text="bit order:").pack(side="left", padx=(12, 1))
+        self.v_bitorder = tk.StringVar(value=BIT_ORDERS[0][0])
+        bcb = ttk.Combobox(row8, textvariable=self.v_bitorder, width=24, state="readonly",
+                           values=[n for n, _ in BIT_ORDERS])
+        bcb.pack(side="left")
+        bcb.bind("<<ComboboxSelected>>", lambda _e: self._bit_order_changed())
         self.window.bind_all("<KeyPress>", self._macro_key, add="+")
         self.window.bind_all("<Button-1>", self._macro_defocus, add="+")
         self.root.after(100, self._btc_poll)
@@ -3028,6 +3195,30 @@ class App:
         self.ctl.update(inj_hold_ms=v)
         self.inj["hold_ms"] = v
 
+    def _bit_order_changed(self):
+        """Change the order used for the NEXT pooled/injected bit, live.
+
+        Already-pooled bits remain valid because the pool stores bits by their
+        actual bit position. Only the position selected for the next guess
+        changes, so the search does not restart and queued keys are retained.
+        """
+        mode = dict(BIT_ORDERS).get(self.v_bitorder.get(), "halves")
+        with self.search._lock:
+            self.search.order_mode = mode
+        with self.fsearch._lock:
+            self.fsearch.order_mode = mode
+
+        self._show_search(self.search.snapshot())
+        self._log(f"# bit order: {self.v_bitorder.get()} "
+                  f"(live; existing pooled bits retained)")
+
+    def _inj_gap_changed(self):
+        try:
+            v = max(0, min(10000, int(float(self.v_inj_gap.get()))))
+        except (ValueError, TypeError):
+            return
+        self.ctl.update(inj_gap_ms=v)
+
     def _inj_scan_changed(self):
         on = self.v_inj_scan.get()
         self.inj["scan"] = on
@@ -3078,36 +3269,41 @@ class App:
     def _timed_send(self, kind, bit):
         key = (self.ctl.get(f"macro_{kind}_higher", "w") if bit
                else self.ctl.get(f"macro_{kind}_lower", "s"))
-        if self.ctl.get("inj_dry_run", False):
-            self._btc_q.put(("inj", f"DRY RUN: would send Shift+{key.upper()} for {kind} bit {bit}"))
-            return
-        delay = max(0.0, float(self.ctl.get("inj_delay_ms", 0))) / 1000.0
-        hold = float(self.ctl.get("inj_hold_ms", 40)) / 1000.0
-        self.ctl["inj_guard_until"] = time.time() + delay + hold + 0.6   # our window ignores it
-        if delay:
-            time.sleep(delay)
-        inject_combo(key, True, hold, bool(self.ctl.get("inj_scan", True)))
-        self._btc_q.put(("inj", f"INJECTED Shift+{key.upper()} for {kind} bit {bit} (timed)"))
+        self.mux.put(kind, key, f"{kind} bit {bit} (timed)")
 
     def _timed_step(self):
-        """Send the next bit of the search and of the factoriser, then pool it."""
+        """Interleave the BITS themselves, not every injection source.
+
+        Each timed tick sends exactly one bit, alternating round-robin between
+        the enabled bit sources (search and factor). The shared dispatcher then
+        sends queued keys in FIFO order; it does not reorder different kinds of
+        injections.
+        """
+        sources = []
         for kind, src, on_key, bits_key in (
                 ("search", self.search, "search_on", "inj_search_bits"),
                 ("factor", self.fsearch, "fsearch_on", "inj_factor_bits")):
-            if not (self.ctl.get(on_key, True) and self.ctl.get(bits_key, True)):
-                continue
-            bit = src.next_bit()
-            if bit is None:                        # factoriser engine not ready yet
-                continue
-            self._timed_send(kind, bit)
-            fc0 = src.final_checks
-            if src.guess():                        # pool the bit; True only on a verified final check
-                post_outcome(self.ctl, True)       # success: bins + Shift+A
-                self._btc_q.put(("inj", f"TIMED {kind.upper()} FOUND; success queued "
-                                        f"(bins are used when the circuit is running)"))
-            elif src.final_checks > fc0:           # final check ran and failed
-                post_outcome(self.ctl, False)      # failure: gap token + Shift+D
-                self._btc_q.put(("inj", f"TIMED {kind.upper()} FAILED; failure queued"))
+            if self.ctl.get(on_key, True) and self.ctl.get(bits_key, True):
+                sources.append((kind, src))
+        if not sources:
+            return
+
+        idx = getattr(self, "_timed_bit_idx", 0)
+        kind, src = sources[idx % len(sources)]
+        self._timed_bit_idx = idx + 1
+
+        bit = src.next_bit()
+        if bit is None:                        # factoriser engine not ready yet
+            return
+        self._timed_send(kind, bit)
+        fc0 = src.final_checks
+        if src.guess():                        # pool the bit; True only on a verified final check
+            post_outcome(self.ctl, True)       # success: bins + Shift+A
+            self._btc_q.put(("inj", f"TIMED {kind.upper()} FOUND; success queued "
+                                    f"(bins are used when the circuit is running)"))
+        elif src.final_checks > fc0:           # final check ran and failed
+            post_outcome(self.ctl, False)      # failure: gap token + Shift+D
+            self._btc_q.put(("inj", f"TIMED {kind.upper()} FAILED; failure queued"))
 
     def _inj_key_changed(self, var, key):
         v = var.get().strip()[-1:]
@@ -3116,54 +3312,17 @@ class App:
         if var.get() != v.upper() and v.isalnum():
             var.set(v.upper())
 
-    def _inject_call(self, call, extra_delay_ms=0):
-        """Send the macro key for 'higher' / 'lower' to the OS from a worker thread."""
-        key = self.macro_keys[call]
-        delay = max(self.inj["delay_ms"], extra_delay_ms) / 1000.0
-        hold = self.inj["hold_ms"] / 1000.0
-        scan = self.inj["scan"]
-        # our own window must not react to the key we are about to send (would loop)
-        self._inject_guard_until = time.time() + delay + hold + 0.6
-
-        def work():
-            try:
-                if delay:
-                    time.sleep(delay)
-                inject_combo(key, True, hold, scan)
-                self._btc_q.put(("inj", f"INJECTED Shift+{key.upper()} ({call.upper()}) into the focused window."))
-            except Exception as exc:
-                self._btc_q.put(("inj", f"INJECT FAILED: {exc}"))
-        threading.Thread(target=work, daemon=True).start()
+    def _inject_call(self, call, extra_delay_ms=0, source="btc"):
+        """Queue the macro key for 'higher' / 'lower' on the shared injection dispatcher."""
+        self.mux.put(source, self.macro_keys[call], call.upper(), extra_delay_ms / 1000.0)
 
     def _inject_outcome(self, ok):
-        """Shift+A on a success, Shift+D on a failure (keys configurable). Any thread."""
+        """Shift+A on a success, Shift+D on a failure (keys configurable). Any thread.
+        Queued on the same dispatcher as every other key, so outcomes interleave with the rest."""
         if not self.ctl.get("inj_outcome", True):
             return
         key = self.ctl.get("macro_ok", "a") if ok else self.ctl.get("macro_fail", "d")
-        label = "SUCCESS" if ok else "FAILURE"
-        if self.ctl.get("inj_dry_run", False):
-            self._btc_q.put(("inj", f"DRY RUN: would send Shift+{key.upper()} ({label})"))
-            return
-        err = injection_backend_error()
-        if err:
-            self._btc_q.put(("inj", f"outcome key skipped: {err}"))
-            return
-        delay = max(0.0, float(self.ctl.get("inj_delay_ms", 0))) / 1000.0
-        hold = float(self.ctl.get("inj_hold_ms", 40)) / 1000.0
-        guard = time.time() + delay + hold + 0.6
-        self._inject_guard_until = guard                 # our own window ignores the key
-        self.ctl["inj_guard_until"] = guard
-
-        def work():
-            with self._inj_lock:                         # keep key presses from overlapping
-                try:
-                    if delay:
-                        time.sleep(delay)
-                    inject_combo(key, True, hold, bool(self.ctl.get("inj_scan", True)))
-                    self._btc_q.put(("inj", f"INJECTED Shift+{key.upper()} ({label})"))
-                except Exception as exc:
-                    self._btc_q.put(("inj", f"outcome inject failed: {exc}"))
-        threading.Thread(target=work, daemon=True).start()
+        self.mux.put("ok" if ok else "bad", key, "SUCCESS" if ok else "FAILURE")
 
     def _inject_test(self):
         err = injection_backend_error()
@@ -3305,11 +3464,7 @@ class App:
         call = "higher" if bit == "U" else "lower"
         self._log(f"BTC bit {bit}   recent: {self.btc.recent_bits()[-40:]}")
         if self.ctl.get("inj_btc_bits", False):
-            key = self.macro_keys[call].upper()
-            if self.ctl.get("inj_dry_run", False):
-                self._log(f"DRY RUN: would send Shift+{key} for BTC bit {bit}")
-            else:
-                self._inject_call(call)
+            self._inject_call(call, source="btcbit")
         self._btc_show_stats()
 
     def _btc_fail(self, exc):
@@ -3860,6 +4015,7 @@ class App:
             self._timed_stop.set()
         self.fsearch.cancel()
         self.hidden.stop()
+        self.mux.stop()
         self.root.after(150, self.root.destroy)
 
     # ---------------------------------------------------------- events
