@@ -50,36 +50,35 @@ process each frame concurrently as asyncio tasks; the flip-flop stage runs
 once both are finished. The whole pipeline lives in a background thread with
 its own asyncio loop and talks to Tk through a queue.Queue.
 
-Two sequential even states: a hash is mined, and the hidden number is guessed, only on a
+Two sequential even states: the higher/lower bit search and the factoriser are queried only on a
 frame whose x is even AND whose previous frame's x was also even. An odd x or a no-motion
 frame in between breaks the run, so the next even frame only starts a new one.
 
-Higher/lower search (separate from both): a secret of N bits (default 1000) and a
-higher/lower oracle. On every armed frame (two sequential evens) one query yields one bit
-of the secret, which is POOLED; no equality check is made per query. Only when all N bits
-are pooled is the candidate compared with the secret, once. A 1000-bit secret falls in
-1000 pooled queries plus 1 final check instead of about 2^1000 blind guesses. A found secret earns
-one time-code bin and a new secret is hidden.
-
-Hidden-number test (separate from the bit search): a secret integer is drawn in
-0..range-1. A separate clock thread cycles a candidate through that range at a frequency
-that you set in the GUI (1 Hz to 2 kHz, default 17 Hz). The thread never sees the
-secret. Only when two sequential EVEN states have arrived does the frame loop spot-check the candidate AT
-THAT MOMENT; if it equals the secret, one time-code bin is added (same mechanism as a found
-secret). After EVERY spot check, hit or miss, a new secret is hidden. Expected hits = checks / range.
-"New secret" (and changing the range) draws a fresh secret and zeroes the spot checks,
-hits and luck factor. The luck factor is hits / expected hits in percent (100% = average),
-shown with P(>= hits by chance), the binomial tail probability.
+Higher/lower search: a secret of N bits (default 1000) and a higher/lower oracle. On every
+armed frame (two sequential evens) one query yields one bit of the secret, which is POOLED; no
+equality check is made per query. Only when all N bits are pooled is the candidate compared
+with the secret, once. A found secret earns one time-code bin and a new secret is hidden.
 
 Factoriser (separate source, own panel): N is factored through the same higher/lower bit search.
 The oracle holds the smallest prime factor p of N and answers only "p >= trial?". Each armed frame
-pools one bit; one final check runs when the pool is full: 1 < p < N, N % p == 0 and the full prime
-factorisation multiplies back to N. A time-code bin is earned ONLY after that verified solve.
-Typed N is really factored by a background engine (trial division, Fermat, Pollard rho, p-1, ECM,
-quadratic sieve; pip install gmpy2 for speed); the oracle is not ready until the engine finishes.
-Random semiprimes keep their factors inside the oracle, which shows the mechanism only. A
-higher/lower oracle for a factor cannot exist without already knowing it, so the search does not
-make factoring itself cheaper. Camera motion hashes seed the engine's randomness.
+pools one bit; one final check runs when the pool is full. A time-code bin is earned ONLY after
+that verified solve. Typed N is really factored by a background engine (trial division, Fermat,
+Pollard rho, p-1, ECM, quadratic sieve; pip install gmpy2 for speed).
+
+Keystroke injection: with "inject every bit" ticked, every armed frame sends the next secret bit
+of the search / factor as Shift+W (bit 1) or Shift+S (bit 0) to the window that has keyboard focus.
+
+Outcome interleaving: every verified solve / correct BTC call is a SUCCESS, every failed final
+check (pool cleared) / wrong BTC call is a FAILURE. Successes queue time-code bins, failures queue
+a gap token (no bin). The clock stage takes one token per frame, alternating success / failure,
+so the successes' bins are interleaved with the failures instead of arriving in a clump. When one
+side is empty the other drains normally. Every outcome also sends Shift+A (success) or Shift+D
+(failure) to the focused window (keys configurable, same hold / delay / scan / dry-run settings).
+A failure never earns a bin, so the one-sided guarantee is unchanged.
+
+BTC sampler: Binance BTC/USDT samples; the only call is a manual one (Shift+W / Shift+S macro),
+scored once per end-check window. A correct call on a factual sample arms one release, consumed on
+the next even frame as one time-code bin. There is no tree and no automatic call.
 
 Needs a real USB camera and OpenCV: motion comes only from what the camera
 sees. There is no simulated source; if the camera can't be opened, it says so.
@@ -137,8 +136,7 @@ def miller_rabin_witness(a: int, n: int) -> bool:
 
 
 def is_odd_composite(x: int) -> bool:
-    """Exact for x < 3.3e24 (deterministic Miller-Rabin). The old trial division ran ~2e9
-    iterations on 64-bit hashes and froze the whole program."""
+    """Exact for x < 3.3e24 (deterministic Miller-Rabin)."""
     if x < 9 or x % 2 == 0:
         return False
     for p in (3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37):
@@ -175,37 +173,7 @@ except ImportError:                                   # plain Python ints are fi
 class Cancelled(Exception):
     pass
 
-class ToyPowChain:
-    """Toy proof-of-work chain over price samples. Deterministic and verifiable.
-    It commits to PAST data only, so it cannot predict the next move."""
 
-    def __init__(self, difficulty_bits=12):
-        self.difficulty = difficulty_bits
-        self.prev = b"\x00" * 32
-        self.last_nonce = 0
-        self.last_hash = self.prev
-
-    def _digest(self, prev, price, nonce):
-        return hashlib.sha256(prev + repr(round(price, 8)).encode() +
-                              nonce.to_bytes(8, "big")).digest()
-
-    def mine(self, price):
-        target = 1 << (256 - self.difficulty)
-        nonce = 0
-        while True:
-            d = self._digest(self.prev, price, nonce)
-            if int.from_bytes(d, "big") < target:
-                self.prev, self.last_nonce, self.last_hash = d, nonce, d
-                return d, nonce
-            nonce += 1
-
-    def verify(self, prev, price, nonce):
-        d = self._digest(prev, price, nonce)
-        return int.from_bytes(d, "big") < (1 << (256 - self.difficulty))
-
-    def feature_bit(self):
-        """One deterministic bit from the committed hash (usable as tree context)."""
-        return "1" if self.last_hash[-1] & 1 else "0"
 class EntropyPool:
     """Randomness for the factoriser. Camera motion frames are hashed into the pool when the
     circuit runs; the operating-system generator is always mixed in, so it works with no camera."""
@@ -530,7 +498,6 @@ class Factoriser:
         b2 = min(50 * b1, 20_000_000)
         D = 2310
         half = D // 2
-        # baby steps [j]Q for 1 <= j <= D/2, kept when gcd(j, D) == 1
         baby = {}
         px, pz = qx, qz                       # [1]Q
         baby[1] = (px, pz)
@@ -544,7 +511,6 @@ class Factoriser:
             prev, cur = cur, nxt
             if math.gcd(j, D) == 1:
                 baby[j] = cur
-        # giant steps [mD]Q, each new one = previous + [D]Q with the one before as difference
         dx, dz = mul(D, qx, qz)
         m = max(2, b1 // D)
         r_prev = mul((m - 1) * D, qx, qz)
@@ -578,7 +544,6 @@ class Factoriser:
         ln_n = math.log(n)
         bound = int(math.exp(0.5 * math.sqrt(ln_n * math.log(ln_n))))
         bound = max(bound, 300)
-        # factor base: primes p with n a quadratic residue mod p
         fb, roots = [], []
         for p in _primes_upto(bound):
             p = int(p)
@@ -598,14 +563,14 @@ class Factoriser:
         fb_np = np.array(fb, dtype=np.int64)
         roots_np = np.array(roots, dtype=np.int64)
         s_mod = np.array([s % p for p in fb], dtype=np.int64)
-        r1 = np.array([(r - s) % p for r, p in zip(roots, fb)], dtype=np.int64)       # x = r - s
+        r1 = np.array([(r - s) % p for r, p in zip(roots, fb)], dtype=np.int64)
         r2 = np.array([(-r - s) % p for r, p in zip(roots, fb)], dtype=np.int64)
         logp = np.log2(fb_np.astype(np.float64)).astype(np.float32)
-        sieve_from = 6                                    # skip the tiniest primes while sieving
+        sieve_from = 6
         BS = 1 << 16 if digits < 45 else 1 << 17
         slack = 1.4 * math.log2(fb[-1]) + 6
-        piv = {}                       # high bit -> (vector, history)
-        rels = []                      # (s + x, {prime_index: exponent}, sign)
+        piv = {}
+        rels = []
         block = 0
         found = None
         s_f = float(s)
@@ -633,7 +598,6 @@ class Factoriser:
                     v = abs(val)
                     if v == 0:
                         continue
-                    # which FB primes divide this value: x + s == +-root (mod p)
                     xm = (x + s_mod) % fb_np
                     hit = np.nonzero((xm == roots_np) | (xm == (fb_np - roots_np) % fb_np))[0]
                     expo = {}
@@ -717,9 +681,7 @@ def _tonelli(a: int, p: int) -> int:
 # ------------------------------------------------------------------ hidden-number guesser
 HIDDEN_RANGE_DEFAULT = 100
 HIDDEN_RANGE_MAX = 1_000_000
-GUESS_HZ_MIN, GUESS_HZ_MAX = 20.0, 2000.0     # the clock wanders between these
-GUESS_RETUNE_S = 0.3                          # how often the clock re-reads the frequency setting
-GUESS_HZ_DEFAULT = 17.0                       # starting clock frequency (adjustable in the GUI)
+GUESS_HZ_DEFAULT = 17.0                       # starting clock frequency
 GUESS_HZ_LIMITS = (1.0, 2000.0)               # allowed range for the frequency box
 
 
@@ -738,12 +700,8 @@ def prob_at_least(hits: int, n: int, p: float) -> float:
 
 class HiddenNumber:
     """A secret integer in [0, size) and a separate thread that clock-cycles a candidate
-    through the same range at a randomly varying frequency.
-
-    The thread only counts. It never compares against the secret. The comparison happens
-    in spot_check(), which the frame loop calls when an even state arrives: it reads the
-    candidate AT THAT INSTANT (no scanning, no waiting) and reports whether it equals the
-    secret. So a hit is pure timing luck, with probability about 1/size per check."""
+    through the same range. Kept for completeness; the frame loop does not use it in this
+    version (hidden-number test is off)."""
 
     def __init__(self, size=HIDDEN_RANGE_DEFAULT, rng=None):
         self._rng = rng or np.random.default_rng()
@@ -753,19 +711,18 @@ class HiddenNumber:
         self.candidate = 0
         self.hz = GUESS_HZ_DEFAULT
         self.target_hz = GUESS_HZ_DEFAULT
-        self._wake = threading.Event()      # interrupts the clock's wait on a change
+        self._wake = threading.Event()
         self.ticks = 0
         self.checks = 0
         self.hits = 0
-        self.rounds = 0                     # how many secrets have been guessed so far
-        self.last_check = None              # (candidate, hit)
-        self.last_found = None              # (number, checks it took) of the latest hit
+        self.rounds = 0
+        self.last_check = None
+        self.last_found = None
         self._secret = 0
         self.revealed = False
         self.set_range(size)
         self._thread = threading.Thread(target=self._run, daemon=True)
 
-    # ---- control
     def start(self):
         if not self._thread.is_alive():
             self._thread.start()
@@ -775,7 +732,6 @@ class HiddenNumber:
         self._wake.set()
 
     def set_hz(self, hz: float):
-        """Change the clock frequency (takes effect immediately)."""
         lo, hi = GUESS_HZ_LIMITS
         hz = max(lo, min(hi, float(hz)))
         with self._lock:
@@ -783,7 +739,6 @@ class HiddenNumber:
         self._wake.set()
 
     def _reset_counts_locked(self):
-        """Zero the statistics (caller holds the lock)."""
         self.checks = 0
         self.hits = 0
         self.rounds = 0
@@ -791,7 +746,6 @@ class HiddenNumber:
         self.last_found = None
 
     def set_range(self, size: int):
-        """Change the range, draw a fresh secret and restart the counts."""
         size = max(2, min(HIDDEN_RANGE_MAX, int(size)))
         with self._lock:
             self.size = size
@@ -801,19 +755,16 @@ class HiddenNumber:
             self._reset_counts_locked()
 
     def new_secret(self):
-        """Draw a fresh secret and restart the counts (and the luck factor)."""
         with self._lock:
             self._secret = int(self._rng.integers(0, self.size))
             self.revealed = False
             self._reset_counts_locked()
 
     def reveal(self):
-        """Show the secret to the user (never used by the clock thread)."""
         with self._lock:
             self.revealed = True
             return self._secret
 
-    # ---- the separate clock thread: cycles the candidate, frequency varies
     def _run(self):
         hz = self.target_hz
         period = 1.0 / hz
@@ -821,7 +772,7 @@ class HiddenNumber:
         while not self._stop.is_set():
             with self._lock:
                 new_hz = self.target_hz
-            if new_hz != hz:                       # frequency was changed from the GUI
+            if new_hz != hz:
                 hz = new_hz
                 period = 1.0 / hz
                 nxt = time.perf_counter()
@@ -832,23 +783,21 @@ class HiddenNumber:
             nxt += period
             delay = nxt - time.perf_counter()
             if delay > 0:
-                self._wake.wait(delay)             # wakes early on stop or frequency change
+                self._wake.wait(delay)
                 self._wake.clear()
-            elif delay < -0.05:                    # fell behind: do not burst to catch up
+            elif delay < -0.05:
                 nxt = time.perf_counter()
 
-    # ---- the spot check, called when an even-state frame arrives
     def spot_check(self) -> bool:
         with self._lock:
-            cand = self.candidate                  # the value on the clock right now
+            cand = self.candidate
             hit = cand == self._secret
             self.checks += 1
             self.last_check = (cand, hit)
             if hit:
                 self.hits += 1
                 self.rounds += 1
-                self.last_found = (cand, self.checks)   # the correct number, as hidden
-            # hit or miss, the number is thrown away and a new one is hidden after every check
+                self.last_found = (cand, self.checks)
             self._secret = int(self._rng.integers(0, self.size))
             self.revealed = False
             return hit
@@ -881,31 +830,28 @@ class BinarySearch:
     """A secret integer of `bits` bits and a higher/lower oracle, with POOLED bits.
 
     Each guess() is one oracle query and yields exactly one bit of the secret
-    (most significant bit first): "is secret >= pooled-so-far with this bit set?".
-    The bit is added to a pool and NO equality check is made on that query. Only
-    when all `bits` bits have been pooled is the pooled candidate compared with the
-    secret, once. A secret of n bits therefore costs n pooled queries plus one
-    final check, instead of an independent equality check after every guess.
-    When the final check passes one time-code bin is earned and a new secret is
-    hidden."""
+    (most significant bit first). The bit is added to a pool and NO equality check is made on
+    that query. Only when all `bits` bits have been pooled is the pooled candidate compared with
+    the secret, once. When the final check passes one time-code bin is earned and a new secret
+    is hidden."""
 
     def __init__(self, bits=SEARCH_BITS_DEFAULT):
         self._lock = threading.Lock()
         self.bits = 2
-        self.guesses = 0                    # all oracle queries since the last reset
-        self.final_checks = 0               # equality checks made (one per full pool)
-        self.solves = 0                     # secrets found since the last reset
-        self.solved_guesses = 0             # queries spent on the solved secrets
-        self.round_guesses = 0              # queries spent on the current secret
-        self.last = None                    # (verdict, guess_bits)
-        self.last_found = None              # (number, guesses it took) of the latest find
+        self.guesses = 0
+        self.final_checks = 0
+        self.solves = 0
+        self.solved_guesses = 0
+        self.round_guesses = 0
+        self.last = None
+        self.last_found = None
         self.revealed = False
         self.set_bits(bits)
 
     def _new_round_locked(self):
         self._secret = secrets.randbelow(1 << self.bits)
-        self.pooled = 0                     # bits collected so far, MSB first
-        self.pooled_n = 0                   # how many bits are in the pool
+        self.pooled = 0
+        self.pooled_n = 0
         self.round_guesses = 0
         self.revealed = False
 
@@ -915,7 +861,6 @@ class BinarySearch:
         self.last_found = None
 
     def set_bits(self, bits: int):
-        """Change the size of the secret, draw a new one and restart the counts."""
         with self._lock:
             self.bits = max(2, min(SEARCH_BITS_MAX, int(bits)))
             self._new_round_locked()
@@ -931,22 +876,35 @@ class BinarySearch:
             self.revealed = True
             return self._secret
 
+    def flip_last_bit(self):
+        """Permanently flip the most recently pooled bit (XOR it into the pooled value)."""
+        with self._lock:
+            if self.pooled_n <= 0:
+                return None
+            pos = self.bits - 1 - (self.pooled_n - 1)
+            self.pooled ^= 1 << pos
+            self.last = (f"permaflipped bit {self.pooled_n}/{self.bits}", self.pooled_n)
+            return self.pooled
+
+    def next_bit(self) -> int:
+        """The bit the next guess() will pool (used by keystroke injection)."""
+        with self._lock:
+            shift = self.bits - 1 - self.pooled_n
+            return (self._secret >> shift) & 1
+
     def guess(self) -> bool:
-        """One oracle query. Pools one bit; only the query that completes the pool
-        runs the single final equality check. True when that check finds the secret."""
         with self._lock:
             self.guesses += 1
             self.round_guesses += 1
             shift = self.bits - 1 - self.pooled_n
             trial = self.pooled | (1 << shift)
-            bit = 1 if self._secret >= trial else 0      # oracle: higher/lower, no equality
+            bit = 1 if self._secret >= trial else 0
             self.pooled |= bit << shift
             self.pooled_n += 1
             if self.pooled_n < self.bits:
                 self.last = (f"pooled bit {self.pooled_n}/{self.bits} = {bit}", self.pooled_n)
                 return False
 
-            # pool is full: the ONE final check
             self.final_checks += 1
             if self.pooled == self._secret:
                 self.solves += 1
@@ -971,7 +929,6 @@ class BinarySearch:
                         secret=short_int(self._secret) if self.revealed else None)
 
 
-
 # ------------------------------------------------------------------ factoring by higher/lower search
 FACTOR_BITS_DEFAULT = 256
 FACTOR_BITS_MAX = 4096
@@ -988,7 +945,7 @@ def _engine_proc(n: int, seed: bytes, q):
         fs = [int(f) for f in fz.factor(n)]
         ok = math.prod(fs) == n and all(is_probable_prime(f) for f in fs)
         q.put(("done", fs, ok))
-    except BaseException as e:                                   # report, never hang the parent
+    except BaseException as e:
         q.put(("err", f"{type(e).__name__}: {e}"))
 
 
@@ -1021,17 +978,12 @@ class FactorSearch:
     N is the number to factor. The oracle holds a prime factor p of N (the smallest one) and answers
     only "is p >= this trial value?". Each armed frame (two sequential evens) is one query and pools
     one bit of p, most significant bit first. No equality test is made per query. When all bits are
-    pooled, ONE final check runs: 1 < p < N, N % p == 0, and the full prime factorisation multiplies
-    back to N with every factor a probable prime. Only then is a time-code bin earned.
+    pooled, ONE final check runs. Only then is a time-code bin earned.
 
     Where the oracle gets p:
-      * typed N : a background thread really factors N (trial division, Fermat, Pollard rho, p-1,
-                  ECM, quadratic sieve). Until it finishes the oracle is not ready, no bits are
-                  pooled and no time code can be earned.
-      * generated N : a random semiprime is built and its factors are kept inside the oracle. This
-                  shows the mechanism; the search does not factor N, the oracle already knows p.
-    A higher/lower oracle for a factor of N cannot exist without already knowing that factor, so the
-    pooling is a mechanism, not a shortcut: the cost of factoring is paid by the engine thread."""
+      * typed N : a background process really factors N (unless "high/low only" is ticked, in which
+                  case the typed number itself is the secret and only one equality check runs).
+      * generated N : a random semiprime is built and its factors are kept inside the oracle."""
 
     def __init__(self, pool):
         self._lock = threading.Lock()
@@ -1045,7 +997,7 @@ class FactorSearch:
         self._secret = 0
         self.factors = []
         self.verified = False
-        self.highlow = False            # True: typed N is searched directly, no engine, no factor checks
+        self.highlow = False
         self.progress = ""
         self.msgs = []
         self.revealed = False
@@ -1053,8 +1005,8 @@ class FactorSearch:
         self.round_guesses = 0
         self.guesses = self.final_checks = self.solves = 0
         self.last = None
-        self.last_found = None          # (p, q, queries)
-        self.history = []               # every number the engine finished / every verified solve
+        self.last_found = None
+        self.history = []
         self.t_start = 0.0
         self.engine_s = None
 
@@ -1118,11 +1070,27 @@ class FactorSearch:
             self.revealed = True
             return self._secret
 
+    def flip_last_bit(self):
+        """Permanently flip the most recently pooled bit (XOR it into the pooled value)."""
+        with self._lock:
+            if self.pooled_n <= 0:
+                return None
+            pos = self.width - 1 - (self.pooled_n - 1)
+            self.pooled ^= 1 << pos
+            self.last = f"permaflipped bit {self.pooled_n}/{self.width}"
+            return self.pooled
+
+    def next_bit(self):
+        """The bit the next guess() will pool, or None when the oracle is not ready."""
+        with self._lock:
+            if self.state != "ready":
+                return None
+            shift = self.width - 1 - self.pooled_n
+            return (self._secret >> shift) & 1
+
     # ---------------------------------------------------------- typed number
     def search_number(self, n: int):
-        """High/low only: no primality test, no factoring engine, no factor verification.
-        The oracle holds the typed number itself and answers only "is it >= trial?". Each armed frame
-        pools one bit (most significant first); after the last bit ONE equality check runs."""
+        """High/low only: no primality test, no factoring engine, no factor verification."""
         n = int(n)
         with self._lock:
             self._run += 1
@@ -1157,14 +1125,14 @@ class FactorSearch:
         fs = ok = None
         try:
             while True:
-                if self._run != run:                              # cancelled or a new N was entered
+                if self._run != run:
                     return
                 try:
                     msg = q.get(timeout=0.1)
                 except queue.Empty:
                     if not proc.is_alive():
                         try:
-                            msg = q.get(timeout=0.2)              # result may still be in flight
+                            msg = q.get(timeout=0.2)
                         except queue.Empty:
                             msg = ("err", "engine process stopped unexpectedly")
                     else:
@@ -1240,8 +1208,6 @@ class FactorSearch:
 
     # ---------------------------------------------------------- one armed frame = one oracle query
     def guess(self) -> bool:
-        """Pools one bit. Only the query that completes the pool runs the single final check.
-        True only when that check verifies a correct factorisation."""
         regen = False
         with self._lock:
             if self.state != "ready":
@@ -1250,7 +1216,7 @@ class FactorSearch:
             self.round_guesses += 1
             shift = self.width - 1 - self.pooled_n
             trial = self.pooled | (1 << shift)
-            bit = 1 if self._secret >= trial else 0            # higher/lower, no equality
+            bit = 1 if self._secret >= trial else 0
             self.pooled |= bit << shift
             self.pooled_n += 1
             if self.pooled_n < self.width:
@@ -1258,7 +1224,7 @@ class FactorSearch:
                 return False
             self.final_checks += 1
             c = self.pooled
-            if self.highlow:                                   # one equality check, nothing else
+            if self.highlow:
                 ok = (c == self._secret)
             else:
                 ok = (1 < c < self.n and self.n % c == 0 and self.verified
@@ -1275,7 +1241,7 @@ class FactorSearch:
             self.state = "solved"
             regen = self.mode == "generated"
         if regen:
-            self.generate(self.gen_bits, keep_counts=True)      # next semiprime, same size
+            self.generate(self.gen_bits, keep_counts=True)
         return True
 
     def snapshot(self) -> dict:
@@ -1353,6 +1319,35 @@ def frames_needed(Y: str, n_open: int):
     while window_stats(Y, k)[0] < n_open:
         k += 1
     return k
+
+
+# ------------------------------------------------------------------ success / failure interleaving
+def post_outcome(ctl: dict, ok: bool, queue: bool = True, signal: bool = True):
+    """Record one outcome. A success queues time-code bins, a failure queues a gap token.
+    signal=True also sends the Shift+key through ctl['outcome_cb'] (Shift+A / Shift+D).
+    Safe to call from any thread (single int updates)."""
+    if queue:
+        if ok:
+            ctl["out_ok"] = ctl.get("out_ok", 0) + int(ctl.get("bins_per_hit", 1))
+        else:
+            ctl["out_bad"] = ctl.get("out_bad", 0) + 1
+    cb = ctl.get("outcome_cb")
+    if signal and cb:
+        cb(bool(ok))
+
+
+def take_outcome_slot(ctl: dict) -> int:
+    """Called once per frame. Alternates success / failure tokens.
+    Returns 1 if this frame adds a time-code bin (a success token), else 0."""
+    ok, bad = ctl.get("out_ok", 0), ctl.get("out_bad", 0)
+    if ok <= 0 and bad <= 0:
+        return 0
+    turn = ctl.get("out_turn", 0)                 # 0 = the success's turn
+    if ok > 0 and (turn == 0 or bad <= 0):
+        ctl["out_ok"], ctl["out_turn"] = ok - 1, 1
+        return 1
+    ctl["out_bad"], ctl["out_turn"] = bad - 1, 0
+    return 0
 
 
 # ------------------------------------------------------------------ keystroke injection
@@ -1437,7 +1432,6 @@ def inject_combo(key: str, shift: bool = True, hold: float = 0.04, scan: bool = 
 
 
 # ------------------------------------------------------------------ tunable variables
-# key: (label, default, low, high, step, is_int, tooltip-ish note)
 TUNE_DEFAULTS = dict(
     bin_w=1, phase=0, clock="frames", bin_ms=100.0, invert=False, bins_per_hit=1,
     rc_ms=RC_B * 1000, tau_ms=TAU_NODE * 1000, vs=VS, vbe=V_BE, vih=V_IH,
@@ -1461,10 +1455,7 @@ def gate_out(mode: str, st) -> int:
 
 
 def y_bin_at(ctl: dict, idx: int, elapsed: float):
-    """Time-code bin for this frame -> (bit, bin_index).
-    clock 'frames': the bin advances every bin_w camera frames.
-    clock 'ms'    : the bin advances every bin_ms milliseconds of wall-clock time.
-    phase rotates the code, invert flips every bit."""
+    """Time-code bin for this frame -> (bit, bin_index)."""
     y = ctl["y"]
     if ctl.get("clock", "frames") == "ms":
         n = int(elapsed * 1000.0 // max(1.0, float(ctl.get("bin_ms", 100.0))))
@@ -1478,9 +1469,7 @@ def y_bin_at(ctl: dict, idx: int, elapsed: float):
 
 
 def effective_code(ctl: dict) -> str:
-    """The code as the circuit sees it frame by frame (one char per frame, periodic).
-    Used by the error-bound analysis. In 'ms' mode the bin width in frames is estimated
-    from the measured frame rate."""
+    """The code as the circuit sees it frame by frame (one char per frame, periodic)."""
     y = ctl["y"]
     if ctl.get("clock", "frames") == "ms":
         fps = ctl.get("fps_est") or 30.0
@@ -1499,9 +1488,7 @@ _WD: dict = {}
 
 
 def witness_density(x: int) -> float:
-    """Exact fraction of r in [2, x-2] that are Miller-Rabin witnesses for x
-    (0 for primes, even numbers and x < 5). This is Driver A's true success
-    probability on instance x. Rabin: >= 3/4 for every odd composite."""
+    """Exact fraction of r in [2, x-2] that are Miller-Rabin witnesses for x."""
     if x not in _WD:
         if x < 5 or x % 2 == 0:
             _WD[x] = 0.0
@@ -1556,14 +1543,14 @@ class DriverAnalysis:
     def reset(self):
         self.cm = {n: dict(tp=0, fp=0, fn=0, tn=0) for n, _ in self.NAMES}
         self.n_noinst = 0
-        self.link_miss = 0                  # c(x)=1 but B stayed LOW (timing)
+        self.link_miss = 0
         self.q_checked = self.q_mismatch = 0
-        self.a_seq, self.w_seq, self.r_seq = [], [], []     # in-L frames, in order
+        self.a_seq, self.w_seq, self.r_seq = [], [], []
         self.min_w = 1.0
 
     def update(self, rec: dict, w: float):
         A, B, Q, y = rec["A"], rec["B"], rec["Q"], rec["y_bin"]
-        pred = ((A & B) | y) if rec["force"] else (A & B & y)    # what Q should be
+        pred = ((A & B) | y) if rec["force"] else (A & B & y)
         self.q_checked += 1
         self.q_mismatch += int(pred != Q)
         if not rec["motion"]:
@@ -1684,7 +1671,7 @@ class Source:
                 f"Cannot open camera {index}. Check that it is connected, not in use "
                 f"by another app, and that the camera number is right.")
         self.cap = cap
-        self.rgb = None                  # latest colour frame (for the preview)
+        self.rgb = None
 
     def read(self):
         """Return a full-resolution uint8 gray frame, or None."""
@@ -1707,7 +1694,7 @@ class Source:
 def downscale(gray: np.ndarray, blur: int = 5) -> np.ndarray:
     """Shrink and blur so sensor grain does not count as motion."""
     small = cv2.resize(gray, (SW, SH), interpolation=cv2.INTER_AREA)
-    k = max(1, int(blur)) | 1                      # kernel must be odd
+    k = max(1, int(blur)) | 1
     return small if k == 1 else cv2.GaussianBlur(small, (k, k), 0)
 
 
@@ -1781,8 +1768,7 @@ def _hamming74_decode(bits: list):
 
 
 def q_channel(raw: int, ctl: dict, frame: int, entropy: int):
-    """Apply configurable Q inversion, fault injection, and optional ECC.
-    Hamming(7,4) encodes 0000/1111 so its decoded majority represents Q."""
+    """Apply configurable Q inversion, fault injection, and optional ECC."""
     raw = int(bool(raw))
     if ctl.get("q_invert", False):
         raw ^= 1
@@ -1837,11 +1823,11 @@ def q_channel(raw: int, ctl: dict, frame: int, entropy: int):
     syndrome = 0
     if ecc == "Hamming(7,4)":
         nibble, syndrome = _hamming74_decode(noisy)
-        decoded = int(nibble.bit_count() >= 2)
+        decoded = int(bin(nibble).count("1") >= 2)
         corrected = int(syndrome != 0)
     elif ecc.startswith("repetition-"):
         decoded = int(sum(noisy) > len(noisy) // 2)
-        corrected = int(decoded != raw and flips > 0)  # decoder outcome differs from source
+        corrected = int(decoded != raw and flips > 0)
     else:
         decoded = noisy[0]
         corrected = 0
@@ -1861,7 +1847,9 @@ class SimThread(threading.Thread):
 
     async def _run(self):
         ctl, out = self.ctl, self.out
-        hidden = search = fsearch = None      # oracle-exclusive: only the BTC oracle releases time codes
+        hidden = None                          # hidden-number test stays off
+        search = ctl.get("search")             # higher/lower bit search
+        fsearch = ctl.get("fsearch")           # factoriser
         try:
             try:
                 cw, ch = (int(v) for v in str(ctl.get("cam_res", "640x480")).split("x"))
@@ -1926,17 +1914,17 @@ class SimThread(threading.Thread):
                     return
                 st.orv = st.A | st.B
                 st.andv = st.A & st.B
-                st.gate = gate_out(ctl.get("gate", "AND"), st)                       # tied -> AND
+                st.gate = gate_out(ctl.get("gate", "AND"), st)
                 tau = max(1e-5, float(ctl.get("tau_ms", beta_tau * 1000)) / 1000.0)
                 st.node = st.gate * (1 - math.exp(-p.dt / tau))        # 10 uF node
                 bit, st.y_idx = y_bin_at(ctl, p.idx, time.perf_counter() - t_start)
                 cap = int(ctl.get("pending_cap", 0))
-                if cap > 0 and ctl.get("timecode_pending", 0) > cap:
-                    ctl["timecode_pending"] = cap
-                added = 1 if ctl.get("timecode_pending", 0) > 0 else 0
+                if cap > 0 and ctl.get("out_ok", 0) > cap:
+                    ctl["out_ok"] = cap
+                # one token per frame, success and failure alternating: a success token adds one bin
+                added = take_outcome_slot(ctl)
+                ctl["timecode_pending"] = ctl.get("out_ok", 0)         # for the display
                 st.y_bin = bit | added
-                if added:                                # one found number = one added bin
-                    ctl["timecode_pending"] -= 1
                 d_in = int(st.node > float(ctl.get("node_thr", 0.5)))
                 if ctl.get("force"):                             # Y OR-ed in (Thm 4 demo)
                     st.q_raw = d_in | st.y_bin
@@ -1953,6 +1941,26 @@ class SimThread(threading.Thread):
         qn = asyncio.Queue()
         AN = DriverAnalysis()
 
+        async def inject_bit(kind, bit):
+            """Send the macro key for one secret bit to the focused window. Runs without
+            blocking the frame loop (sleep and key press are off the event loop)."""
+            key = (ctl.get(f"macro_{kind}_higher", "w") if bit
+                   else ctl.get(f"macro_{kind}_lower", "s"))
+            if ctl.get("inj_dry_run", False):
+                out.put(("info", f"DRY RUN: would send Shift+{key.upper()} for {kind} bit {bit}"))
+                return
+            delay = max(0.0, float(ctl.get("inj_delay_ms", 0))) / 1000.0
+            hold = float(ctl.get("inj_hold_ms", 40)) / 1000.0
+            ctl["inj_guard_until"] = time.time() + delay + hold + 0.6   # our own window ignores it
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await asyncio.to_thread(inject_combo, key, True, hold,
+                                        bool(ctl.get("inj_scan", True)))
+                out.put(("info", f"INJECTED Shift+{key.upper()} for {kind} bit {bit}"))
+            except Exception as exc:
+                out.put(("info", f"bit keystroke failed: {exc}"))
+
         # Shared statistics. Defined BEFORE the tasks so it never races the closures.
         S = dict(frames=0, motion=0, in_L=0, acc_in_L=0, false_acc=0, accepts=0,
                  open_inL=0, acc_open_inL=0,
@@ -1961,7 +1969,7 @@ class SimThread(threading.Thread):
                  factor_timecodes=0)
 
         def codes_snapshot():
-            """Time-code statistics from the hidden-number and bit searches."""
+            """Time-code statistics from the bit searches."""
             return dict(
                 circuit=bool(ctl.get("circuit", True)),
                 last_x=S["last_x"], last_even=S["last_even"], last_armed=S["last_armed"],
@@ -1973,7 +1981,8 @@ class SimThread(threading.Thread):
                 search=S.get("search"),
                 fsearch=S.get("fsearch"),
                 hidden=S.get("hidden"),
-                timecode_pending=int(ctl.get("timecode_pending", 0)))
+                timecode_pending=int(ctl.get("out_ok", 0)),
+                failures_pending=int(ctl.get("out_bad", 0)))
 
         async def analyst():                           # runs beside the drivers
             seen = 0
@@ -2050,9 +2059,9 @@ class SimThread(threading.Thread):
                     ctl["pool"].feed(digest)            # camera motion seeds the factoriser randomness
                 pkt = Packet(idx, dt, x, motion, int.from_bytes(digest, "big"))
 
-                # A hidden-number spot check or a search guess is only allowed after TWO SEQUENTIAL even
-                # states: this frame and the one right before it must both be even. A frame
-                # with no motion (x = 0) or an odd x breaks the run.
+                # A search guess is only allowed after TWO SEQUENTIAL even states: this frame and
+                # the one right before it must both be even. A frame with no motion (x = 0) or an
+                # odd x breaks the run.
                 even_now = x > 0 and x % 2 == 0
                 even_state = even_now and prev_even        # armed: two evens in a row
                 prev_even = even_now
@@ -2060,99 +2069,73 @@ class SimThread(threading.Thread):
                 if even_state:
                     S["mined_even"] += 1                   # armed frames seen
 
-                # Frequency decision: while even frames are available, sample a square wave at the
-                # chosen Hz. First half of the cycle = HIGH, second half = LOW. The oracle uses the latest sample.
-                if even_now and ctl.get("btc_oracle") is not None:
-                    _hz = float(ctl.get("btc_freq_hz", 17.0))
-                    _ph = (time.perf_counter() * _hz) % 1.0
-                    ctl["btc_oracle"].set_freq_call("higher" if _ph < 0.5 else "lower", _hz)
-
-                # BTC high/low oracle: one armed release is consumed on the next even state.
+                # BTC release: one armed release is consumed on the next even state.
                 if even_now and ctl.get("btc_release_armed", False):
                     ctl["btc_release_armed"] = False
-                    ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
+                    post_outcome(ctl, True, queue=True, signal=False)   # key already sent at the end check
                     S["btc_timecodes"] = S.get("btc_timecodes", 0) + 1
                     ctl["btc_released"] = ctl.get("btc_released", 0) + 1
                     S["timecodes_added"] = S.get("timecodes_added", 0) + 1
                     btc_call = ctl.get("btc_last_call", "--")
                     btc_price = ctl.get("btc_last_price", 0.0)
                     out.put(("log",
-                        f"BTC HIGH/LOW ORACLE EVEN RELEASE: even frame x={x}; "
-                        f"oracle call={btc_call}; BTC/USDT=${btc_price:,.2f}; "
-                        f"one time-code bin released; pending={ctl['timecode_pending']}."
+                        f"BTC RELEASE: even frame x={x}; "
+                        f"last call={btc_call}; BTC/USDT=${btc_price:,.2f}; "
+                        f"success queued; pending bins={ctl.get('out_ok', 0)}, "
+                        f"pending gaps={ctl.get('out_bad', 0)}."
                     ))
 
-                # Hidden-number test: only two sequential even states trigger a spot check, and it reads
-                # the clock-cycled candidate at this very moment.
+                # Hidden-number test: off in this version.
                 hidden_hit = False
-                if hidden is not None and ctl.get("hidden_on", True) and even_state:
-                    hidden_hit = hidden.spot_check()
-                    if hidden_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
-                        S["hidden_timecodes"] += 1
-                        S["timecodes_added"] += 1
-                        out.put(("hidden_hit", dict(frame=idx, x=x, time=time.time(),
-                                                    snap=hidden.snapshot())))
-                if hidden is not None:
-                    S["hidden"] = hidden.snapshot()
 
                 # Higher/lower search: one oracle guess per armed frame (two sequential evens)
                 search_hit = False
-                if search is not None and ctl.get("search_on", True) and even_state:
-                    if ctl.get("inj_last_bit", False) and search.pooled_n == search.bits - 1:
-                        _shift = search.bits - 1 - search.pooled_n
-                        _bit = 1 if (search.secret >> _shift) & 1 else 0
-                        _key = ctl.get("macro_higher", "w") if _bit else ctl.get("macro_lower", "s")
-                        try:
-                            inject_combo(
-                                _key,
-                                shift=True,
-                                hold=float(ctl.get("inj_hold_ms", 40)) / 1000.0,
-                                scan=bool(ctl.get("inj_scan", True)),
-                            )
-                            out.put("info", f"INJECTED Shift+{_key.upper()} for final search bit {_bit}")
-                        except Exception as _exc:
-                            out.put("error", f"final-bit keystroke failed: {_exc}")
+                if (search is not None and ctl.get("search_on", True) and even_state
+                        and not ctl.get("inj_timed", False)):
+                    if ctl.get("inj_all_bits", False) and ctl.get("inj_search_bits", True):
+                        await inject_bit("search", search.next_bit())
+                    fc0 = search.final_checks
                     search_hit = search.guess()
                     if search_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
+                        post_outcome(ctl, True)                      # success: bins + Shift+A
                         S["search_timecodes"] += 1
                         S["timecodes_added"] += 1
                         sn = search.snapshot()
                         out.put(("search_hit", dict(frame=idx, x=x, bits=sn["bits"],
                                                     solves=sn["solves"], avg=sn["avg"],
                                                     found=sn["last_found"])))
+                    elif search.final_checks > fc0:                  # final check ran and failed
+                        post_outcome(ctl, False)                     # failure: gap + Shift+D
+                        out.put(("log", f"SEARCH FAILED frame {idx}: final check failed, "
+                                        f"pool cleared; failure queued"))
                 if search is not None:
                     S["search"] = search.snapshot()
 
                 # Factoriser: one higher/lower query per armed frame; a time code is earned ONLY when the
-                # single final check verifies a correct factorisation (separate source, own counter).
+                # single final check verifies a correct factorisation.
                 factor_hit = False
-                if fsearch is not None and ctl.get("fsearch_on", True) and even_state:
-                    if ctl.get("inj_last_bit", False) and fsearch.pooled_n == fsearch.width - 1:
-                        _shift = fsearch.width - 1 - fsearch.pooled_n
-                        _bit = 1 if (fsearch.secret >> _shift) & 1 else 0
-                        _key = ctl.get("macro_higher", "w") if _bit else ctl.get("macro_lower", "s")
-                        try:
-                            inject_combo(
-                                _key,
-                                shift=True,
-                                hold=float(ctl.get("inj_hold_ms", 40)) / 1000.0,
-                                scan=bool(ctl.get("inj_scan", True)),
-                            )
-                            out.put("info", f"INJECTED Shift+{_key.upper()} for final factor bit {_bit}")
-                        except Exception as _exc:
-                            out.put("error", f"final-bit keystroke failed: {_exc}")
+                if (fsearch is not None and ctl.get("fsearch_on", True) and even_state
+                        and not ctl.get("inj_timed", False)):
+                    if ctl.get("inj_all_bits", False) and ctl.get("inj_factor_bits", True):
+                        fbit = fsearch.next_bit()          # None until the oracle is ready
+                        if fbit is not None:
+                            await inject_bit("factor", fbit)
+                    fc0 = fsearch.final_checks
                     factor_hit = fsearch.guess()
                     if factor_hit:
-                        ctl["timecode_pending"] = ctl.get("timecode_pending", 0) + int(ctl.get("bins_per_hit", 1))
+                        post_outcome(ctl, True)                      # success: bins + Shift+A
                         S["factor_timecodes"] += 1
                         S["timecodes_added"] += 1
                         fn = fsearch.snapshot()
                         out.put(("factor_hit", dict(frame=idx, x=x, found=fn["last_found"],
                                                     solves=fn["solves"])))
+                    elif fsearch.final_checks > fc0:
+                        post_outcome(ctl, False)                     # failure: gap + Shift+D
+                        out.put(("log", f"FACTOR FAILED frame {idx}: final check failed, "
+                                        f"pool cleared; failure queued"))
                 if fsearch is not None:
                     S["fsearch"] = fsearch.snapshot()
+
                 # ---- drivers A and B on this frame, concurrently; then flip-flop
                 run_circuit = ctl.get("circuit", True)
                 if run_circuit:
@@ -2242,106 +2225,56 @@ def fixed_label(parent, width_px, height_px, **kw):
 
 FRAME_INTERVAL = 33                # ms between GUI redraws (~30 fps cap)
 LOG_INTERVAL = 100                 # ms between log flushes
-MINER_INTERVAL = 0.2               # s between miner panel refreshes
-
+MINER_INTERVAL = 0.2               # s between source panel refreshes
 
 
 class BitcoinHighLowOracle:
-    """Binance BTC/USDT HIGH/LOW oracle: continuous up/down bits, binary decision tree,
-    one end check per window.
-
-    observe()   : called for EVERY sample (e.g. each second). Records the binary value
-                  (U = price rose, D = price fell, unchanged = skipped) in the recent-bit
-                  context, and trains the tree with every sample that is now `window_s`
-                  seconds old: its outcome is the price now versus the price then.
-    end_check() : called ONCE per window. Scores the call made at the start of the window
-                  (a tie is not scored) and makes the call for the next window. The call
-                  comes from the deepest tree node (up to `depth` bits) with at least
-                  MIN_OBS observations and a strict majority; otherwise NO CALL.
-
-    Windows do not overlap, so the binomial p-value of the end-check record is valid.
-    BTC over seconds/minutes is close to a random walk: expect ~50%.
-    fetch_sample() does network I/O: call it from a worker thread only.
-    """
+    """Binance BTC/USDT sampler. No tree and no automatic calls: the only call is a manual
+    one (keyboard macro). observe() records each sample, end_check() runs once per window,
+    scores the pending manual call against the price now (a tie is not scored) and clears it.
+    fetch_sample() does network I/O: call it from a worker thread only."""
 
     URL = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-    MAX_DEPTH = 8
-    MIN_OBS = 3
 
     def __init__(self):
         self._lock = threading.RLock()
-        self.depth = 3
         self.window_s = 10.0
         self.last_price = None
         self.last_hash = None
         self.last_factual = None
         self.last_checks = None
         self.last_update = None
-        self.fresh_count = 0
-        self.factual_count = 0
-        self.rejected_count = 0
-        self.released_count = 0          # kept for compatibility; the GUI shows ctl["btc_released"]
-        self.pending_manual = False
-        self.m_correct = self.m_total = 0
-        self.reset_tree()
-        self.pow = ToyPowChain(difficulty_bits=5)
-        self.use_hash = False          # A/B switch, off by default
-        self.pow_hash = None
-    # ---------------------------------------------------------- state
-    def reset_tree(self):
+        self.fresh_count = self.factual_count = self.rejected_count = 0
+        self.reset_score()
+
+    def reset_score(self):
         with self._lock:
-            self.tree = {}                                   # path tuple -> [ups, downs]
-            self.moves = deque(maxlen=self.MAX_DEPTH)        # recent binary values, "U"/"D"
-            self.samples = deque(maxlen=20000)               # (time, price, context) waiting for the window
-            self._prev_tick_price = None
             self.pending_guess = None
             self.pending_price = None
-            self.last_prediction = None
-            self.correct = self.total = self.ties = self.abstains = 0
-            self.ticks = self.trained = 0
-            self.pending_manual = False
+            self.ties = 0
+            self.ticks = 0
             self.m_correct = self.m_total = 0
+            self.moves = deque(maxlen=64)       # recent price-move bits, "U" up / "D" down
+            self.nbits = 0
+            self._prev_tick_price = None
 
-    def set_depth(self, depth):
+    def recent_bits(self):
         with self._lock:
-            self.depth = max(1, min(self.MAX_DEPTH, int(depth)))
+            return "".join(self.moves) or "-"
 
     def set_window(self, seconds):
         with self._lock:
             self.window_s = max(1.0, float(seconds))
 
-    def _learn_ctx(self, ctx, outcome):
-        for L in range(0, len(ctx) + 1):
-            node = self.tree.setdefault(ctx[len(ctx) - L:], [0, 0])
-            node[0 if outcome == "U" else 1] += 1
-
-    def _predict(self):
-        """(call, depth_used, ups, downs) from the deepest qualifying node, or None."""
-        h = list(self.moves)
-        for L in range(min(self.depth, len(h)), -1, -1):
-            node = self.tree.get(tuple(h[len(h) - L:]))
-            if node and sum(node) >= self.MIN_OBS and node[0] != node[1]:
-                return ("higher" if node[0] > node[1] else "lower", L, node[0], node[1])
-        return None
-
-    def recent_bits(self):
-        return "".join(self.moves) or "-"
-
     def manual_call(self, call):
-        """Keyboard macro: replace the pending call with 'higher' or 'lower' at the latest price.
-        It is scored at the next end check like any tree call, but counted separately so the
-        tree's own record stays clean. Returns the price, or None if no sample has arrived yet."""
+        """Keyboard macro: set the pending 'higher' / 'lower' call at the latest price."""
         with self._lock:
             if self.last_price is None:
                 return None
             self.pending_guess = call
             self.pending_price = self.last_price
-            self.pending_manual = True
-            self.last_prediction = {"guess": call.upper(), "made_at_price": self.last_price,
-                                    "node": None, "manual": True}
             return self.last_price
 
-    # ---------------------------------------------------------- checks (unchanged logic)
     @staticmethod
     def _driver_b_checks(raw, data, price):
         checks = {
@@ -2370,7 +2303,6 @@ class BitcoinHighLowOracle:
         checks["driver_a"] = all(checks.values())
         return {"digest": digest.hex(), "x": x, "composite": composite, **checks}
 
-    # ---------------------------------------------------------- network
     def fetch_sample(self):
         """One Binance request. Returns (price, factual, a_checks, b_checks)."""
         request = urllib.request.Request(
@@ -2383,56 +2315,11 @@ class BitcoinHighLowOracle:
         a_checks = self._driver_a_check(raw)
         return price, b_checks["driver_b"] and a_checks["driver_a"], a_checks, b_checks
 
-    # ---------------------------------------------------------- every sample
-    MAX_NODES = 5000        # hard cap on tree size
-    HASH_DEPTH = 2          # hash bit only splits contexts of length <= this
-
-    # __init__: add before self.reset_tree()
-    #   self.pow = ToyPowChain(difficulty_bits=12)
-    #   self.use_hash = False          # A/B switch, off by default
-    #   self.pow_hash = None
-
-    def set_use_hash(self, on):
-        with self._lock:
-            self.use_hash = bool(on)
-
-    def _bump(self, key, outcome):
-        node = self.tree.get(key)
-        if node is None:
-            if len(self.tree) >= self.MAX_NODES:
-                return                              # cardinality cap: no new nodes
-            node = self.tree[key] = [0, 0]
-        node[0 if outcome == "U" else 1] += 1
-
-    def _learn_ctx(self, ctx, hbit, outcome):
-        for L in range(len(ctx) + 1):
-            suffix = ctx[len(ctx) - L:]
-            self._bump(suffix, outcome)             # plain keys: unchanged
-            if self.use_hash and L <= self.HASH_DEPTH:
-                self._bump(("H" + hbit,) + suffix, outcome)   # separate keyspace
-
-    def _predict(self):
-        h = list(self.moves)
-        hb = "H" + self.pow.feature_bit()           # bit of the LAST committed sample
-        for L in range(min(self.depth, len(h)), -1, -1):
-            suffix = tuple(h[len(h) - L:])
-            keys = [suffix]
-            if self.use_hash and L <= self.HASH_DEPTH:
-                keys.insert(0, (hb,) + suffix)
-            for key in keys:
-                node = self.tree.get(key)
-                if node and sum(node) >= self.MIN_OBS and node[0] != node[1]:
-                    return ("higher" if node[0] > node[1] else "lower", L, node[0], node[1])
-        return None
-
     def observe(self, price, factual, a_checks, b_checks, now=None):
         now = time.time() if now is None else now
-        self.pow.mine(price)                        # outside the lock
-        hbit = self.pow.feature_bit()
         with self._lock:
             self.last_price = price
             self.last_hash = a_checks["digest"]
-            self.pow_hash = self.pow.last_hash.hex()
             self.last_factual = factual
             self.last_checks = {"driver_a": a_checks, "driver_b": b_checks, "factual": factual}
             self.last_update = now
@@ -2441,76 +2328,47 @@ class BitcoinHighLowOracle:
                 self.factual_count += 1
             else:
                 self.rejected_count += 1
-
-            while self.samples and now - self.samples[0][0] >= self.window_s:
-                _t0, p0, ctx, h0 = self.samples.popleft()
-                if price != p0:
-                    self._learn_ctx(ctx, h0, "U" if price > p0 else "D")
-                    self.trained += 1
-
-            if self._prev_tick_price is not None and price != self._prev_tick_price:
-                self.moves.append("U" if price > self._prev_tick_price else "D")
-            self._prev_tick_price = price
             self.ticks += 1
-            self.samples.append((now, price, tuple(self.moves), hbit))
-            # ---------------------------------------------------------- once per window
+            bit = None
+            if self._prev_tick_price is not None and price != self._prev_tick_price:
+                bit = "U" if price > self._prev_tick_price else "D"
+                self.moves.append(bit)
+                self.nbits += 1
+            self._prev_tick_price = price
+            return bit                               # None when the price did not move
+
     def end_check(self):
-        """Score the previous window's call, then make the call for the next window.
-        Returns (price, result_or_None, factual, changed) or None if there is no sample yet."""
+        """Returns (price, result_or_None, factual, changed) or None if there is no sample yet."""
         with self._lock:
             if self.last_price is None:
                 return None
             price = self.last_price
             changed = self.pending_price is None or price != self.pending_price
-
             result = None
             if self.pending_guess is not None and self.pending_price is not None:
                 if price == self.pending_price:
                     self.ties += 1
                 else:
                     went_up = price > self.pending_price
-                    is_correct = (self.pending_guess == "higher") == went_up
-                    if self.pending_manual:
-                        self.m_total += 1
-                        self.m_correct += int(is_correct)
-                    else:
-                        self.total += 1
-                        self.correct += int(is_correct)
-                    result = {
-                        "guess": self.pending_guess.upper(),
-                        "previous": self.pending_price,
-                        "actual": price,
-                        "actual_direction": "HIGH" if went_up else "LOW",
-                        "correct": is_correct,
-                        "manual": self.pending_manual,
-                    }
-
-            pred = self._predict()
-            self.pending_manual = False
-            if pred is None:
-                self.abstains += 1
-                self.pending_guess = None
-                self.pending_price = None
-                self.last_prediction = {"guess": "NO CALL", "made_at_price": price, "node": None}
-            else:
-                call, used, ups, downs = pred
-                self.pending_guess = call
-                self.pending_price = price
-                self.last_prediction = {"guess": call.upper(), "made_at_price": price,
-                                        "node": (used, ups, downs)}
+                    ok = (self.pending_guess == "higher") == went_up
+                    self.m_total += 1
+                    self.m_correct += int(ok)
+                    result = {"guess": self.pending_guess.upper(),
+                              "previous": self.pending_price, "actual": price,
+                              "actual_direction": "HIGH" if went_up else "LOW",
+                              "correct": ok, "manual": True}
+            self.pending_guess = None
+            self.pending_price = None
             return price, result, self.last_factual, changed
 
     def stats(self):
         with self._lock:
-            n, k = self.total, self.correct
-            return dict(correct=k, total=n, ties=self.ties, abstains=self.abstains,
-                        rate=(k / n if n else None),
-                        nodes_hash=sum(1 for k in self.tree if k and isinstance(k[0], str) and k[0].startswith("H")),
-                        use_hash=self.use_hash,
-                        p_value=(prob_at_least(k, n, 0.5) if n else None),
-                        nodes=len(self.tree), depth=self.depth, window=self.window_s,
-                        ticks=self.ticks, trained=self.trained, bits=self.recent_bits(),
-                        m_correct=self.m_correct, m_total=self.m_total)
+            return dict(ties=self.ties, ticks=self.ticks,
+                        m_correct=self.m_correct, m_total=self.m_total,
+                        pending=self.pending_guess,
+                        bits="".join(self.moves) or "-", nbits=self.nbits,
+                        p_value=(prob_at_least(self.m_correct, self.m_total, 0.5)
+                                 if self.m_total else None))
 
 
 class ScrollFrame(ttk.Frame):
@@ -2543,7 +2401,6 @@ class ScrollFrame(ttk.Frame):
         self._schedule_bars()
 
     def _schedule_bars(self):
-        # debounce: size changes can toggle the scrollbars, which change the size again
         if getattr(self, "_bars_job", None) is None:
             self._bars_job = self.after(60, self._run_bars)
 
@@ -2579,7 +2436,6 @@ class ScrollFrame(ttk.Frame):
         self.canvas.unbind_all("<Button-5>")
 
     def _wheel(self, e):
-        # leave the wheel alone over spinboxes (it changes their value) and text boxes
         if e.widget.winfo_class() in ("TSpinbox", "Text"):
             return
         if not self.vbar.winfo_ismapped():
@@ -2591,7 +2447,7 @@ class ScrollFrame(ttk.Frame):
 class App:
     def __init__(self, window):
         self.window = window                          # the real Tk window
-        window.title("RP circuit + hidden number, bit search and BTC HIGH/LOW even-frame oracle")
+        window.title("RP circuit + higher/lower bit search, factoriser and BTC sampler")
         self.scroller = ScrollFrame(window)
         self.scroller.pack(fill="both", expand=True)
         root = self.scroller.inner                    # every widget below lives in here
@@ -2602,21 +2458,34 @@ class App:
         root.destroy = window.destroy
         self.q = queue.Queue()
         self.thread = None
-        self.inj = dict(tree=False, manual=False, change_only=False, scan=True, delay_ms=0, hold_ms=40)
+        self.inj = dict(manual=False, change_only=False, scan=True, delay_ms=0, hold_ms=40)
         self._inject_guard_until = 0.0
         self._last_injected = None
+        self._inj_lock = threading.Lock()             # serialises outcome key presses
         self.ctl = dict(stop=False, thr=18, min_px=30, k=5, y="1111", circuit=True,
                         overlay=True, force=False,
                         timecode_pending=0,
                         hidden_on=True, search_on=True)
         self.ctl.update(TUNE_DEFAULTS)
         self.ctl.update(
-            inj_last_bit=False,
-            macro_higher="w",
-            macro_lower="s",
+            inj_all_bits=False,
+            inj_search_bits=True,
+            inj_factor_bits=True,
+            inj_dry_run=False,
+            inj_delay_ms=0,
             inj_hold_ms=40,
             inj_scan=True,
+            inj_guard_until=0.0,
+            inj_timed=False,
+            inj_timed_ms=200,
+            macro_search_higher="w",
+            macro_search_lower="s",
+            macro_factor_higher="w",
+            macro_factor_lower="s",
+            out_ok=0, out_bad=0, out_turn=0,
+            inj_outcome=True, macro_ok="a", macro_fail="d",
         )
+        self.ctl["outcome_cb"] = self._inject_outcome
         self.hidden = HiddenNumber(HIDDEN_RANGE_DEFAULT)
         self.hidden.start()
         self.ctl["hidden"] = self.hidden
@@ -2627,8 +2496,6 @@ class App:
         self.ctl.update(fsearch=self.fsearch, fsearch_on=True, pool=self.pool)
         self.btc = BitcoinHighLowOracle()
         self.photos = [None, None, None]
-        self.btc_auto_job = None
-        self.btc_auto_running = False
         self.q_hist = deque(maxlen=84)          # (Q, y_bin, motion)
         self.x_hist = deque(maxlen=150)
         self.last_traj = []
@@ -2674,7 +2541,6 @@ class App:
                                          justify="left", wraplength=PW - 6)
         box.pack(anchor="w", pady=(6, 0))
         self.analysis_box = box
-        # the log sits in the time-code row (see _miner_panel)
         self._y_changed()
         self._compact = False
         self.v_compact = tk.BooleanVar(value=False)
@@ -2687,8 +2553,7 @@ class App:
 
     # ---------------------------------------------------------- compact mode
     def _apply_compact(self):
-        """Hide the bulky read-only extras so the essentials fit a laptop screen:
-        the IF/THEN link plot and the time-code analysis text."""
+        """Hide the bulky read-only extras so the essentials fit a laptop screen."""
         on = self.v_compact.get()
         if on == self._compact:
             return
@@ -2766,7 +2631,7 @@ class App:
                 try:
                     v = float(var.get())
                 except ValueError:
-                    return                                   # half-typed: keep the last good value
+                    return
                 v = min(max(v, lo), hi)
                 self.ctl[key] = int(round(v)) if integer else v
                 self._refresh_analysis()
@@ -2832,6 +2697,7 @@ class App:
             ttk.Label(fq, text=label).pack(side="left", padx=(6, 1))
             var = tk.StringVar(value=str(self.ctl.get(key, TUNE_DEFAULTS.get(key, 0))))
             self.q_vars[key] = var
+
             def qchanged(*_):
                 try:
                     val = float(var.get())
@@ -2927,8 +2793,8 @@ class App:
         self._btc_window_s = 10.0
         panel = ttk.LabelFrame(
             self.root,
-            text="Bitcoin HIGH/LOW oracle: continuous up/down samples train a binary tree; "
-                 "one end check every n seconds; release only after a correct call"
+            text="Bitcoin HIGH/LOW sampler: manual call (keyboard macro), one end check every n seconds; "
+                 "release only after a correct call"
         )
         panel.grid(row=3, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
         row1 = ttk.Frame(panel)
@@ -2939,7 +2805,7 @@ class App:
         self.btc_price_var = tk.StringVar(value="BTC/USDT: --")
         ttk.Label(row1, textvariable=self.btc_price_var, width=22,
                   font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=8)
-        self.btc_call_var = tk.StringVar(value="Tree call: --")
+        self.btc_call_var = tk.StringVar(value="Call: none pending")
         ttk.Label(row1, textvariable=self.btc_call_var, width=50,
                   font=("TkDefaultFont", 11, "bold")).pack(side="left", padx=10)
 
@@ -2951,15 +2817,6 @@ class App:
         self.btc_period_var = tk.StringVar(value="10")
         ttk.Spinbox(row1, from_=1, to=3600, width=5, textvariable=self.btc_period_var).pack(side="left")
         ttk.Label(row1, text="s").pack(side="left", padx=(2, 8))
-
-        ttk.Label(row1, text="Depth").pack(side="left", padx=(4, 2))
-        self.btc_depth_var = tk.StringVar(value=str(self.btc.depth))
-        dsp = ttk.Spinbox(row1, from_=1, to=BitcoinHighLowOracle.MAX_DEPTH, width=3,
-                          textvariable=self.btc_depth_var, command=self._btc_depth_changed)
-        dsp.pack(side="left")
-        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
-            dsp.bind(ev, lambda e: self.root.after_idle(self._btc_depth_changed), add="+")
-        ttk.Button(row1, text="Reset tree", command=self._btc_reset_tree).pack(side="left", padx=(8, 2))
         self.btc_auto_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(row1, text="Run", variable=self.btc_auto_var,
                         command=self.btc_toggle_auto).pack(side="left", padx=6)
@@ -2972,16 +2829,16 @@ class App:
         rbox.pack(side="left", padx=12)
         self.btc_stats_var = types.SimpleNamespace(set=lambda t: set_text(slab, t))
         self.btc_result_var = types.SimpleNamespace(set=lambda t: set_text(rlab, t))
-        self.btc_stats_var.set("tree: no samples yet")
-        self.btc_result_var.set("Tick Run. A release is armed only when the previous window's call "
-                                "matched the market move on a factual end check.")
+        self.btc_stats_var.set("no samples yet")
+        self.btc_result_var.set("Tick Run, then press the keyboard macro to make a call. A release is armed "
+                                "only when a call matched the market move on a factual end check.")
         row3 = ttk.Frame(panel)
         row3.pack(fill="x", padx=4, pady=(0, 4))
-        ttk.Label(row3, text="Keyboard macros (override the pending call, scored at the next end check):"
+        ttk.Label(row3, text="Keyboard macros (make a call, scored at the next end check):"
                   ).pack(side="left", padx=(8, 6))
         self.macro_keys = {"higher": "w", "lower": "s"}
         for call, label in (("higher", "HIGHER"), ("lower", "LOWER")):
-            ttk.Label(row3, text=f"Shift +").pack(side="left")
+            ttk.Label(row3, text="Shift +").pack(side="left")
             var = tk.StringVar(value=self.macro_keys[call].upper())
 
             def changed(*_, call=call, var=var):
@@ -2996,9 +2853,6 @@ class App:
         row4 = ttk.Frame(panel)
         row4.pack(fill="x", padx=4, pady=(0, 4))
         ttk.Label(row4, text="Inject real keystrokes into the focused window:").pack(side="left", padx=(8, 6))
-        self.v_inj_tree = tk.BooleanVar(value=False)
-        ttk.Checkbutton(row4, text="on tree calls", variable=self.v_inj_tree,
-                        command=lambda: self._inject_toggle("tree")).pack(side="left", padx=4)
         self.v_inj_manual = tk.BooleanVar(value=False)
         ttk.Checkbutton(row4, text="on manual macros", variable=self.v_inj_manual,
                         command=lambda: self._inject_toggle("manual")).pack(side="left", padx=4)
@@ -3006,35 +2860,89 @@ class App:
         ttk.Checkbutton(row4, text="only when the call changes", variable=self.v_inj_change,
                         command=lambda: self.inj.update(change_only=self.v_inj_change.get())
                         ).pack(side="left", padx=4)
-        self.v_inj_lastbit = tk.BooleanVar(value=False)
+        self.v_inj_allbits = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            row4,
-            text="Shift+W/S on final bit",
-            variable=self.v_inj_lastbit,
-            command=lambda: self.ctl.update(
-                inj_last_bit=self.v_inj_lastbit.get(),
-                macro_higher=self.macro_keys["higher"],
-                macro_lower=self.macro_keys["lower"],
-                inj_hold_ms=self.inj["hold_ms"],
-                inj_scan=self.inj["scan"],
-            ),
+            row4, text="inject every bit", variable=self.v_inj_allbits,
+            command=self._toggle_allbits
         ).pack(side="left", padx=4)
+        self.v_inj_search = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row4, text="search bits", variable=self.v_inj_search,
+            command=lambda: self.ctl.update(inj_search_bits=self.v_inj_search.get())
+        ).pack(side="left", padx=4)
+        self.v_inj_factor = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row4, text="factor bits", variable=self.v_inj_factor,
+            command=lambda: self.ctl.update(inj_factor_bits=self.v_inj_factor.get())
+        ).pack(side="left", padx=4)
+        self.v_inj_dry = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            row4, text="dry run", variable=self.v_inj_dry,
+            command=lambda: self.ctl.update(inj_dry_run=self.v_inj_dry.get())
+        ).pack(side="left", padx=4)
+        ttk.Label(row4, text="delay ms").pack(side="left", padx=(8, 1))
+        self.v_inj_delay = tk.StringVar(value="0")
+        ttk.Spinbox(row4, from_=0, to=10000, increment=10, width=6,
+                    textvariable=self.v_inj_delay).pack(side="left")
+        self.v_inj_delay.trace_add("write", lambda *_: self._inj_delay_changed())
+        ttk.Label(row4, text="hold ms").pack(side="left", padx=(8, 1))
+        self.v_inj_hold = tk.StringVar(value="40")
+        ttk.Spinbox(row4, from_=10, to=1000, increment=10, width=6,
+                    textvariable=self.v_inj_hold).pack(side="left")
+        self.v_inj_hold.trace_add("write", lambda *_: self._inj_hold_changed())
+        ttk.Label(row4, text="search W/S").pack(side="left", padx=(10, 1))
+        self.v_inj_search_w = tk.StringVar(value="W")
+        self.v_inj_search_s = tk.StringVar(value="S")
+        ttk.Entry(row4, width=2, textvariable=self.v_inj_search_w, justify="center").pack(side="left", padx=2)
+        ttk.Entry(row4, width=2, textvariable=self.v_inj_search_s, justify="center").pack(side="left", padx=2)
+        ttk.Label(row4, text="factor W/S").pack(side="left", padx=(10, 1))
+        self.v_inj_factor_w = tk.StringVar(value="W")
+        self.v_inj_factor_s = tk.StringVar(value="S")
+        ttk.Entry(row4, width=2, textvariable=self.v_inj_factor_w, justify="center").pack(side="left", padx=2)
+        ttk.Entry(row4, width=2, textvariable=self.v_inj_factor_s, justify="center").pack(side="left", padx=2)
+        for var, key in ((self.v_inj_search_w, "macro_search_higher"),
+                         (self.v_inj_search_s, "macro_search_lower"),
+                         (self.v_inj_factor_w, "macro_factor_higher"),
+                         (self.v_inj_factor_s, "macro_factor_lower")):
+            var.trace_add("write", lambda *_a, v=var, k=key: self._inj_key_changed(v, k))
         self.v_inj_scan = tk.BooleanVar(value=True)
         ttk.Checkbutton(row4, text="scan codes (games)", variable=self.v_inj_scan,
-                        command=lambda: self.inj.update(scan=self.v_inj_scan.get())
-                        ).pack(side="left", padx=4)
-        for label, key, lo, hi, init in (("delay ms", "delay_ms", 0, 10000, 0), ("hold ms", "hold_ms", 10, 1000, 40)):
-            ttk.Label(row4, text=label).pack(side="left", padx=(8, 1))
-            v = tk.StringVar(value=str(init))
-
-            def inj_changed(*_, key=key, v=v, lo=lo, hi=hi):
-                try:
-                    self.inj[key] = int(min(max(float(v.get()), lo), hi))
-                except ValueError:
-                    pass
-            v.trace_add("write", inj_changed)
-            ttk.Spinbox(row4, from_=lo, to=hi, increment=10, width=6, textvariable=v).pack(side="left")
+                        command=self._inj_scan_changed).pack(side="left", padx=4)
         ttk.Button(row4, text="Test inject (3 s)", command=self._inject_test).pack(side="left", padx=10)
+        row5 = ttk.Frame(panel)
+        row5.pack(fill="x", padx=4, pady=(0, 4))
+        self.v_inj_timed = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row5, text="timed inject: start sending bits now (no camera or armed frames needed)",
+                        variable=self.v_inj_timed, command=self._toggle_timed).pack(side="left", padx=(8, 4))
+        ttk.Label(row5, text="one bit every").pack(side="left", padx=(8, 1))
+        self.v_inj_timed_ms = tk.StringVar(value="200")
+        ttk.Spinbox(row5, from_=20, to=60000, increment=50, width=7,
+                    textvariable=self.v_inj_timed_ms).pack(side="left")
+        ttk.Label(row5, text="ms   (uses the search bits / factor bits boxes, keys, hold, scan codes "
+                             "and dry run above)").pack(side="left", padx=(4, 0))
+        self.v_inj_timed_ms.trace_add("write", lambda *_: self._inj_timed_ms_changed())
+        self._timed_stop = None
+        row6 = ttk.Frame(panel)
+        row6.pack(fill="x", padx=4, pady=(0, 4))
+        self.v_inj_btcbits = tk.BooleanVar(value=False)
+        ttk.Checkbutton(row6, text="inject BTC bits: every fetched price move sends a key "
+                                   "(up = HIGHER key, down = LOWER key; needs Run ticked)",
+                        variable=self.v_inj_btcbits, command=self._toggle_btcbits).pack(side="left", padx=(8, 4))
+        row7 = ttk.Frame(panel)
+        row7.pack(fill="x", padx=4, pady=(0, 4))
+        self.v_inj_outcome = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row7, text="inject on every outcome (success / failure):",
+                        variable=self.v_inj_outcome,
+                        command=lambda: self.ctl.update(inj_outcome=self.v_inj_outcome.get())
+                        ).pack(side="left", padx=(8, 4))
+        for label, key, init in (("success Shift +", "macro_ok", "A"),
+                                 ("failure Shift +", "macro_fail", "D")):
+            ttk.Label(row7, text=label).pack(side="left", padx=(8, 1))
+            var = tk.StringVar(value=init)
+            ttk.Entry(row7, width=2, textvariable=var, justify="center").pack(side="left", padx=2)
+            var.trace_add("write", lambda *_a, v=var, k=key: self._inj_key_changed(v, k))
+        ttk.Label(row7, text="  (successes' time-code bins are interleaved with failures, one token per frame)",
+                  foreground="#666").pack(side="left", padx=(8, 0))
         self.window.bind_all("<KeyPress>", self._macro_key, add="+")
         self.window.bind_all("<Button-1>", self._macro_defocus, add="+")
         self.root.after(100, self._btc_poll)
@@ -3065,22 +2973,148 @@ class App:
             pass
 
     def _inject_toggle(self, which):
-        var = self.v_inj_tree if which == "tree" else self.v_inj_manual
+        """Manual-macro injection toggle only; per-bit injection has its own switch."""
+        var = self.v_inj_manual
         if var.get():
             err = injection_backend_error()
             if err:
                 messagebox.showerror("Inject keystrokes", err)
                 var.set(False)
                 return
-            if not messagebox.askokcancel(
-                    "Inject keystrokes",
-                    "This sends REAL keystrokes (Shift + the macro key) to whichever window has "
-                    "keyboard focus, including other programs.\n\nMake sure the right window is "
-                    "focused and that a stray Shift+W / Shift+S there is harmless. Enable?"):
-                var.set(False)
-                return
         self.inj[which] = var.get()
         self._log(f"Keystroke injection for {which} calls: {'ON' if var.get() else 'off'}.")
+
+    def _toggle_allbits(self):
+        on = self.v_inj_allbits.get()
+        self.ctl.update(inj_all_bits=on)
+        if on:
+            err = injection_backend_error()
+            if err:
+                messagebox.showerror("Inject every bit", err)
+                self.v_inj_allbits.set(False)
+                self.ctl.update(inj_all_bits=False)
+                return
+            self._log("Per-bit keystroke injection ON (search / factor bits on armed frames).")
+        else:
+            self._log("Per-bit keystroke injection OFF.")
+
+    def _toggle_btcbits(self):
+        on = self.v_inj_btcbits.get()
+        if on:
+            err = injection_backend_error()
+            if err:
+                messagebox.showerror("Inject BTC bits", err)
+                self.v_inj_btcbits.set(False)
+                return
+            self._log("BTC bit injection ON: each fetched price move sends the HIGHER/LOWER macro key "
+                      "to the focused window.")
+        else:
+            self._log("BTC bit injection OFF.")
+        self.ctl.update(inj_btc_bits=on)
+
+    def _inj_delay_changed(self):
+        try:
+            v = max(0, min(10000, int(float(self.v_inj_delay.get()))))
+        except (ValueError, TypeError):
+            return
+        self.ctl.update(inj_delay_ms=v)
+        self.inj["delay_ms"] = v
+
+    def _inj_hold_changed(self):
+        try:
+            v = max(10, min(1000, int(float(self.v_inj_hold.get()))))
+        except (ValueError, TypeError):
+            return
+        self.ctl.update(inj_hold_ms=v)
+        self.inj["hold_ms"] = v
+
+    def _inj_scan_changed(self):
+        on = self.v_inj_scan.get()
+        self.inj["scan"] = on
+        self.ctl.update(inj_scan=on)
+
+    # ---------------------------------------------------------- timed injection
+    def _inj_timed_ms_changed(self):
+        try:
+            v = max(20, min(60000, int(float(self.v_inj_timed_ms.get()))))
+        except (ValueError, TypeError):
+            return
+        self.ctl.update(inj_timed_ms=v)
+
+    def _toggle_timed(self):
+        """Ticking the box starts a worker thread that sends one secret bit every N ms, with no
+        camera and no armed frames. While it is on, the frame loop does not query the search or
+        the factoriser, so no bit is pooled twice."""
+        if self.v_inj_timed.get():
+            err = injection_backend_error()
+            if err:
+                messagebox.showerror("Timed inject", err)
+                self.v_inj_timed.set(False)
+                return
+            self._inj_timed_ms_changed()
+            self.ctl.update(inj_timed=True)
+            if self._timed_stop is not None:
+                self._timed_stop.set()
+            self._timed_stop = threading.Event()
+            threading.Thread(target=self._timed_loop, args=(self._timed_stop,), daemon=True).start()
+            self._log(f"Timed injection ON: one bit every {self.ctl['inj_timed_ms']} ms. "
+                      f"Click the target window now; keys go to whichever window has focus.")
+        else:
+            self.ctl.update(inj_timed=False)
+            if self._timed_stop is not None:
+                self._timed_stop.set()
+            self._timed_stop = None
+            self._log("Timed injection OFF.")
+
+    def _timed_loop(self, stop):                   # OFF the Tk thread
+        while not stop.is_set():
+            t0 = time.time()
+            try:
+                self._timed_step()
+            except Exception as exc:
+                self._btc_q.put(("inj", f"timed inject error: {exc}"))
+            stop.wait(max(0.01, self.ctl["inj_timed_ms"] / 1000.0 - (time.time() - t0)))
+
+    def _timed_send(self, kind, bit):
+        key = (self.ctl.get(f"macro_{kind}_higher", "w") if bit
+               else self.ctl.get(f"macro_{kind}_lower", "s"))
+        if self.ctl.get("inj_dry_run", False):
+            self._btc_q.put(("inj", f"DRY RUN: would send Shift+{key.upper()} for {kind} bit {bit}"))
+            return
+        delay = max(0.0, float(self.ctl.get("inj_delay_ms", 0))) / 1000.0
+        hold = float(self.ctl.get("inj_hold_ms", 40)) / 1000.0
+        self.ctl["inj_guard_until"] = time.time() + delay + hold + 0.6   # our window ignores it
+        if delay:
+            time.sleep(delay)
+        inject_combo(key, True, hold, bool(self.ctl.get("inj_scan", True)))
+        self._btc_q.put(("inj", f"INJECTED Shift+{key.upper()} for {kind} bit {bit} (timed)"))
+
+    def _timed_step(self):
+        """Send the next bit of the search and of the factoriser, then pool it."""
+        for kind, src, on_key, bits_key in (
+                ("search", self.search, "search_on", "inj_search_bits"),
+                ("factor", self.fsearch, "fsearch_on", "inj_factor_bits")):
+            if not (self.ctl.get(on_key, True) and self.ctl.get(bits_key, True)):
+                continue
+            bit = src.next_bit()
+            if bit is None:                        # factoriser engine not ready yet
+                continue
+            self._timed_send(kind, bit)
+            fc0 = src.final_checks
+            if src.guess():                        # pool the bit; True only on a verified final check
+                post_outcome(self.ctl, True)       # success: bins + Shift+A
+                self._btc_q.put(("inj", f"TIMED {kind.upper()} FOUND; success queued "
+                                        f"(bins are used when the circuit is running)"))
+            elif src.final_checks > fc0:           # final check ran and failed
+                post_outcome(self.ctl, False)      # failure: gap token + Shift+D
+                self._btc_q.put(("inj", f"TIMED {kind.upper()} FAILED; failure queued"))
+
+    def _inj_key_changed(self, var, key):
+        v = var.get().strip()[-1:]
+        if v.isalnum():
+            self.ctl.update(**{key: v.lower()})
+        if var.get() != v.upper() and v.isalnum():
+            var.set(v.upper())
 
     def _inject_call(self, call, extra_delay_ms=0):
         """Send the macro key for 'higher' / 'lower' to the OS from a worker thread."""
@@ -3101,6 +3135,36 @@ class App:
                 self._btc_q.put(("inj", f"INJECT FAILED: {exc}"))
         threading.Thread(target=work, daemon=True).start()
 
+    def _inject_outcome(self, ok):
+        """Shift+A on a success, Shift+D on a failure (keys configurable). Any thread."""
+        if not self.ctl.get("inj_outcome", True):
+            return
+        key = self.ctl.get("macro_ok", "a") if ok else self.ctl.get("macro_fail", "d")
+        label = "SUCCESS" if ok else "FAILURE"
+        if self.ctl.get("inj_dry_run", False):
+            self._btc_q.put(("inj", f"DRY RUN: would send Shift+{key.upper()} ({label})"))
+            return
+        err = injection_backend_error()
+        if err:
+            self._btc_q.put(("inj", f"outcome key skipped: {err}"))
+            return
+        delay = max(0.0, float(self.ctl.get("inj_delay_ms", 0))) / 1000.0
+        hold = float(self.ctl.get("inj_hold_ms", 40)) / 1000.0
+        guard = time.time() + delay + hold + 0.6
+        self._inject_guard_until = guard                 # our own window ignores the key
+        self.ctl["inj_guard_until"] = guard
+
+        def work():
+            with self._inj_lock:                         # keep key presses from overlapping
+                try:
+                    if delay:
+                        time.sleep(delay)
+                    inject_combo(key, True, hold, bool(self.ctl.get("inj_scan", True)))
+                    self._btc_q.put(("inj", f"INJECTED Shift+{key.upper()} ({label})"))
+                except Exception as exc:
+                    self._btc_q.put(("inj", f"outcome inject failed: {exc}"))
+        threading.Thread(target=work, daemon=True).start()
+
     def _inject_test(self):
         err = injection_backend_error()
         if err:
@@ -3119,7 +3183,8 @@ class App:
         self._inject_call(call)
 
     def _macro_key(self, e):
-        if time.time() < self._inject_guard_until:            # ignore keys we injected ourselves
+        # ignore keys we injected ourselves (manual-macro injection and per-bit injection)
+        if time.time() < max(self._inject_guard_until, self.ctl.get("inj_guard_until", 0.0)):
             return None
         if not (e.state & 0x1) or (e.state & 0x4):          # needs Shift, and no Ctrl
             return None
@@ -3140,13 +3205,12 @@ class App:
         return "break"
 
     def _btc_apply_manual(self, call, price):
-        shown = f"Tree call: {call.upper()}  [manual, set at ${price:,.2f}]"
-        self.btc_call_var.set(shown)
+        self.btc_call_var.set(f"Call: {call.upper()}  [set at ${price:,.2f}]")
         self.ctl["btc_last_call"] = call.upper()
         self.ctl["btc_last_price"] = price
-        self.btc_result_var.set(f"MANUAL CALL {call.upper()} at ${price:,.2f}; it is scored at the next "
+        self.btc_result_var.set(f"CALL {call.upper()} at ${price:,.2f}; it is scored at the next "
                                 f"end check, and a correct call arms a release.")
-        self._log(f"BTC HIGH/LOW ORACLE MANUAL CALL (Shift+{self.macro_keys[call].upper()}): "
+        self._log(f"BTC HIGH/LOW ORACLE CALL (Shift+{self.macro_keys[call].upper()}): "
                   f"{call.upper()} at ${price:,.2f}.")
         self._maybe_inject("manual", call)
 
@@ -3164,22 +3228,6 @@ class App:
         if win != self._btc_window_s:
             self._btc_window_s = win
             self.btc.set_window(win)
-
-    def _btc_depth_changed(self, _e=None):
-        try:
-            d = int(self.btc_depth_var.get().strip())
-        except (ValueError, tk.TclError):
-            return
-        d = max(1, min(BitcoinHighLowOracle.MAX_DEPTH, d))
-        if d != self.btc.depth:
-            self.btc.set_depth(d)
-            self._log(f"BTC HIGH/LOW ORACLE: tree depth set to {d}.")
-
-    def _btc_reset_tree(self):
-        self.btc.reset_tree()
-        self.ctl["btc_release_armed"] = False
-        self._btc_show_stats()
-        self._log("BTC HIGH/LOW ORACLE: tree, samples and score reset; armed release cancelled.")
 
     def btc_toggle_auto(self):
         """Run / stop the sampler thread."""
@@ -3207,7 +3255,9 @@ class App:
             t0 = time.time()
             try:
                 price, factual, a, b = self.btc.fetch_sample()
-                self.btc.observe(price, factual, a, b)
+                bit = self.btc.observe(price, factual, a, b)
+                if bit:
+                    self._btc_q.put(("bit", bit))
                 now = time.time()
                 if next_end is None or now >= next_end:         # the ONE end check of this window
                     res = self.btc.end_check()
@@ -3234,6 +3284,8 @@ class App:
                     elif kind == "end":
                         self._btc_apply(*payload)
                         last_price = None
+                    elif kind == "bit":
+                        self._btc_bit(payload)
                     elif kind == "inj":
                         self._log(payload)
                     else:
@@ -3248,71 +3300,67 @@ class App:
             self._btc_show_stats()
         self.root.after(100, self._btc_poll)
 
+    def _btc_bit(self, bit):
+        """One price-move bit from a fetched sample: U (up) = HIGHER key, D (down) = LOWER key."""
+        call = "higher" if bit == "U" else "lower"
+        self._log(f"BTC bit {bit}   recent: {self.btc.recent_bits()[-40:]}")
+        if self.ctl.get("inj_btc_bits", False):
+            key = self.macro_keys[call].upper()
+            if self.ctl.get("inj_dry_run", False):
+                self._log(f"DRY RUN: would send Shift+{key} for BTC bit {bit}")
+            else:
+                self._inject_call(call)
+        self._btc_show_stats()
+
     def _btc_fail(self, exc):
-        # a failed sample is simply retried on the next tick; an armed release is kept
         self.btc_result_var.set(f"Binance sample failed: {exc}; retrying.")
         self._log(f"BTC HIGH/LOW ORACLE ERROR: {exc}; retrying.")
 
     def _btc_show_stats(self):
         s = self.btc.stats()
         rel = self.ctl.get("btc_released", 0)
-        rec = (f"{s['correct']}/{s['total']} = {s['rate']:.1%}  P(>= by chance)={s['p_value']:.2f}"
-               if s["total"] else "no scored end checks yet")
+        rec = (f"{s['m_correct']}/{s['m_total']} = {s['m_correct'] / s['m_total']:.1%}  "
+               f"P(>= by chance)={s['p_value']:.2f}" if s["m_total"] else "no scored calls yet")
         self.btc_stats_var.set(
-            f"depth {s['depth']}, {s['nodes']} nodes, trained {s['trained']}: {rec}\n"
-            f"samples {s['ticks']}  last bits {s['bits']}  no-call {s['abstains']}  "
-            f"ties {s['ties']}  released {rel}"
-            + (f"  manual {s['m_correct']}/{s['m_total']}" if s["m_total"] else ""))
+            f"calls: {rec}\n"
+            f"samples {s['ticks']}  ties {s['ties']}  released {rel}"
+            + (f"  pending {s['pending'].upper()}" if s["pending"] else "")
+            + f"\nbits ({s['nbits']}): {s['bits'][-40:]}")
 
     def _btc_apply(self, price, result, factual, changed):
         """One END CHECK finished (once per window)."""
         self.btc_price_var.set(f"BTC/USDT: ${price:,.2f}")
-        pred = self.btc.last_prediction
-        call = pred["guess"]
-        node = pred.get("node")
-        node_txt = "" if not node else f"  [depth {node[0]}: {node[1]} up / {node[2]} down]"
-        self.btc_call_var.set(f"Tree call: {call}{node_txt}")
-        self.ctl["btc_last_call"] = call
+        self.btc_call_var.set("Call: none pending")
+        self.ctl["btc_last_call"] = "--"
         self.ctl["btc_last_price"] = price
-        self._maybe_inject("tree", call.lower())
-
-        checks = self.btc.last_checks
-        a, b = checks["driver_a"], checks["driver_b"]
+        a, b = self.btc.last_checks["driver_a"], self.btc.last_checks["driver_b"]
         change = "price changed" if changed else "price unchanged (tie, not scored)"
-        who = "manual" if (result and result.get("manual")) else "tree"
-
-        # THE RULE: release only if the end check is factual AND the previous window's call matched
         arm = bool(factual and result is not None and result["correct"])
         self.ctl["btc_release_armed"] = arm
-
+        if result is not None:                  # a scored call is an outcome: Shift+A / Shift+D
+            ok = result["correct"]
+            # a correct, factual call queues its bin on the next even frame (release path), so it is
+            # not queued here twice; a wrong call queues a failure gap token now.
+            post_outcome(self.ctl, ok, queue=(not ok), signal=True)
         if arm:
-            self.btc_result_var.set(
-                f"{who.upper()} GUESSED RIGHT ({result['guess']} -> {result['actual_direction']}); "
-                f"release armed for the next even frame. Next call: {call}.")
-            self._log(f"BTC HIGH/LOW ORACLE END CHECK: ${price:,.2f} ({change}); {who} call "
-                      f"{result['guess']} was CORRECT; Driver A={a['driver_a']}, "
-                      f"Driver B={b['driver_b']}; release armed for next even frame.")
+            self.btc_result_var.set(f"CALL RIGHT ({result['guess']} -> {result['actual_direction']}); "
+                                    f"release armed for the next even frame.")
+            self._log(f"BTC END CHECK: ${price:,.2f} ({change}); call {result['guess']} was CORRECT; "
+                      f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; release armed.")
         elif factual:
-            if result is None:
-                reason = "no scored call (tree had no call, or the price was unchanged)"
-            else:
-                reason = f"{who} guessed wrong ({result['guess']} -> {result['actual_direction']})"
-            self.btc_result_var.set(f"FACTUAL ({change}) but {reason}; no release. Next call: {call}.")
-            self._log(f"BTC HIGH/LOW ORACLE END CHECK: ${price:,.2f} ({change}); {reason}; "
-                      f"no release armed; next call={call}.")
+            reason = ("no scored call (none made, or price unchanged)" if result is None
+                      else f"call wrong ({result['guess']} -> {result['actual_direction']})")
+            self.btc_result_var.set(f"FACTUAL ({change}) but {reason}; no release.")
+            self._log(f"BTC END CHECK: ${price:,.2f} ({change}); {reason}; no release armed.")
         else:
-            self.btc_result_var.set(
-                f"NOT FACTUAL ({change}); Driver B={b['driver_b']}, "
-                f"Driver A={a['driver_a']}; no oracle release armed.")
-            self._log(f"BTC HIGH/LOW ORACLE REJECTED: ${price:,.2f} ({change}); "
-                      f"Driver A={a['driver_a']}, Driver B={b['driver_b']}; no release armed.")
-
+            self.btc_result_var.set(f"NOT FACTUAL ({change}); Driver B={b['driver_b']}, "
+                                    f"Driver A={a['driver_a']}; no release armed.")
+            self._log(f"BTC REJECTED: ${price:,.2f} ({change}); no release armed.")
         if result:
-            outcome = "CORRECT" if result["correct"] else "WRONG"
-            self._log(f"BTC HIGH/LOW ORACLE RESULT: {who} call {result['guess']}; "
-                      f"market went {result['actual_direction']}; "
+            self._log(f"BTC RESULT: call {result['guess']}; market went {result['actual_direction']}; "
                       f"${result['previous']:,.2f} -> ${result['actual']:,.2f}; "
-                      f"{outcome}; record {self.btc.correct}/{self.btc.total}")
+                      f"{'CORRECT' if result['correct'] else 'WRONG'}; "
+                      f"record {self.btc.m_correct}/{self.btc.m_total}")
         self._btc_show_stats()
 
     def _miner_panel(self):
@@ -3339,43 +3387,8 @@ class App:
         self.log = tk.Text(logf, height=14, width=58, font=("Consolas", 8), state="disabled",
                            wrap="none")
         self.log.pack(fill="y", expand=True)
-        self._hidden_panel(right)
         self._search_panel(right)
         self._factor_panel(right)
-        right.pack_forget()                   # oracle-exclusive: these sources are inert, hide them
-
-    def _hidden_panel(self, parent):
-        box = ttk.LabelFrame(parent, text="Hidden number (spot check after 2 sequential evens)")
-        box.pack(fill="x", pady=(8, 0))
-        self.hidden_box = box
-        row = ttk.Frame(box)
-        row.pack(anchor="w", padx=6, pady=(4, 0))
-        self.v_hidden_on = tk.BooleanVar(value=True)
-        ttk.Checkbutton(row, text="Enabled", variable=self.v_hidden_on,
-                        command=lambda: self.ctl.update(hidden_on=self.v_hidden_on.get())
-                        ).pack(side="left")
-        ttk.Label(row, text="Range 0 to").pack(side="left", padx=(12, 2))
-        self.v_hrange = tk.StringVar(value=str(HIDDEN_RANGE_DEFAULT))
-        self.s_hrange = ttk.Spinbox(row, from_=2, to=HIDDEN_RANGE_MAX, increment=100, width=9,
-                                    textvariable=self.v_hrange, command=self._hidden_range_changed)
-        self.s_hrange.pack(side="left")
-        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
-            self.s_hrange.bind(ev, lambda e: self.root.after_idle(self._hidden_range_changed), add="+")
-        ttk.Button(row, text="New secret",
-                   command=self._hidden_new_secret).pack(side="left", padx=(12, 2))
-        ttk.Button(row, text="Reveal", command=self._hidden_reveal).pack(side="left", padx=2)
-        ttk.Label(row, text="Freq Hz").pack(side="left", padx=(12, 2))
-        self.v_hhz = tk.StringVar(value=f"{GUESS_HZ_DEFAULT:g}")
-        self.s_hhz = ttk.Spinbox(row, from_=GUESS_HZ_LIMITS[0], to=GUESS_HZ_LIMITS[1],
-                                 increment=1, width=7, textvariable=self.v_hhz,
-                                 command=self._hidden_hz_changed)
-        self.s_hhz.pack(side="left")
-        for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
-            self.s_hhz.bind(ev, lambda e: self.root.after_idle(self._hidden_hz_changed), add="+")
-        hbox, self.l_hidden = fixed_label(box, 480, 92, text="", font=("Consolas", 9),
-                                          justify="left", wraplength=480)
-        hbox.pack(anchor="w", padx=6, pady=(2, 4))
-        set_text(self.l_hidden, "clock idle")
 
     def _search_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Higher/lower search (binary, 1 guess per 2 sequential evens)")
@@ -3395,7 +3408,7 @@ class App:
         for ev in ("<Return>", "<FocusOut>", "<<Increment>>", "<<Decrement>>"):
             self.s_sbits.bind(ev, lambda e: self.root.after_idle(self._search_bits_changed), add="+")
         ttk.Button(row, text="New secret", command=self._search_new_secret).pack(side="left", padx=(12, 2))
-        ttk.Button(row, text="Reveal", command=self._search_reveal).pack(side="left", padx=2)
+        ttk.Button(row, text="Permaflip last bit", command=self._search_flip_last).pack(side="left", padx=2)
         sbox, self.l_search = fixed_label(box, 480, 106, text="", font=("Consolas", 9),
                                           justify="left", wraplength=480)
         sbox.pack(anchor="w", padx=6, pady=(2, 4))
@@ -3417,9 +3430,12 @@ class App:
         self._show_search(self.search.snapshot())
         self._log("# search: new secret drawn, counts reset")
 
-    def _search_reveal(self):
-        v = self.search.reveal()
-        self._log(f"# search secret revealed: {short_int(v, 40)}")
+    def _search_flip_last(self):
+        v = self.search.flip_last_bit()
+        if v is None:
+            self._log("# search permaflip: no pooled bit yet")
+        else:
+            self._log(f"# search permaflipped last bit; pool now {v:0{self.search.bits}b}")
         self._show_search(self.search.snapshot())
 
     def _show_search(self, h):
@@ -3463,7 +3479,7 @@ class App:
         ttk.Spinbox(row2, from_=16, to=FACTOR_BITS_MAX, increment=64, width=6,
                     textvariable=self.v_fbits).pack(side="left", padx=(4, 6))
         ttk.Button(row2, text="Generate", command=self._factor_generate).pack(side="left", padx=2)
-        ttk.Button(row2, text="Reveal factor", command=self._factor_reveal).pack(side="left", padx=2)
+        ttk.Button(row2, text="Permaflip last bit", command=self._factor_flip_last).pack(side="left", padx=2)
         fbox, self.l_factor = fixed_label(box, 480, 118, text="", font=("Consolas", 9),
                                           justify="left", wraplength=480)
         fbox.pack(anchor="w", padx=6, pady=(2, 4))
@@ -3508,10 +3524,13 @@ class App:
     def _factor_cancel(self):
         self.fsearch.cancel()
 
-    def _factor_reveal(self):
-        self.fsearch.reveal()
-        v = self.fsearch.snapshot()["secret"]
-        self._log(f"# factor revealed: {v}" if v else "# factor not known yet")
+    def _factor_flip_last(self):
+        v = self.fsearch.flip_last_bit()
+        if v is None:
+            self._log("# factor permaflip: no pooled bit yet")
+        else:
+            self._log(f"# factor permaflipped last bit; pool now {v:0{self.fsearch.width}b}")
+        self._show_factor(self.fsearch.snapshot())
 
     def _factor_tick(self):
         for s in self.fsearch.drain():
@@ -3522,7 +3541,8 @@ class App:
     def _show_factor(self, h):
         st = {"idle": "idle", "generating": "building a semiprime", "factoring": "ENGINE RUNNING: oracle not ready",
               "ready": "READY: pooling bits on armed frames", "solved": "SOLVED and verified",
-              "prime": "N is PRIME: nothing to factor, no oracle (type a composite)", "failed": "failed", "cancelled": "cancelled"}.get(h["state"], h["state"])
+              "prime": "N is PRIME: nothing to factor, no oracle (type a composite)", "failed": "failed",
+              "cancelled": "cancelled"}.get(h["state"], h["state"])
         nn = "-" if not h["n"] else short_dec(h["n"], 12) + f", {h['n'].bit_length()} bit"
         lines = [f"state: {st}",
                  f"N: {nn}   mode: {h['mode'] or '-'}",
@@ -3539,64 +3559,12 @@ class App:
             lines.append("oracle factor: " + h["secret"])
         set_text(self.l_factor, "\n".join(lines))
 
-    def _hidden_range_changed(self, _e=None):
-        try:
-            n = int(self.v_hrange.get().strip())
-        except (ValueError, tk.TclError):
-            return
-        n = max(2, min(HIDDEN_RANGE_MAX, n))
-        if n != self.hidden.size:
-            self.hidden.set_range(n)
-            self._show_hidden(self.hidden.snapshot())
-            self._log(f"# hidden number: range 0..{n - 1}, new secret drawn, counts reset")
-
-    def _hidden_hz_changed(self, _e=None):
-        try:
-            hz = float(self.v_hhz.get().strip())
-        except (ValueError, tk.TclError):
-            return
-        lo, hi = GUESS_HZ_LIMITS
-        hz = max(lo, min(hi, hz))
-        if hz != self.hidden.target_hz:
-            self.hidden.set_hz(hz)
-            self._log(f"# hidden number: clock frequency set to {hz:g} Hz")
-
-    def _hidden_new_secret(self):
-        self.hidden.new_secret()
-        self._show_hidden(self.hidden.snapshot())      # show the zeroed counts at once
-        self._log("# hidden number: new secret drawn, counts and luck reset")
-
-    def _hidden_reveal(self):
-        v = self.hidden.reveal()
-        self._log(f"# hidden number revealed: {v}")
-
-    def _show_hidden(self, h):
-        if not h:
-            return
-        lc = h["last_check"]
-        last = "none yet" if lc is None else f"candidate {lc[0]} -> {'HIT' if lc[1] else 'miss'}"
-        sec = "hidden" if h["secret"] is None else str(h["secret"])
-        if h["luck"] is None:
-            luck = "luck factor: n/a (no spot checks yet)"
-        else:
-            luck = (f"luck factor: {h['luck']:.0f}%  (100% = average)   "
-                    f"P(>= {h['hits']} hits by chance) = {h['luck_tail']:.1%}")
-        lf = h["last_found"]
-        found = "none yet" if lf is None else f"{lf[0]} (guessed on check #{lf[1]})"
-        set_text(self.l_hidden, (
-            f"clock: candidate {h['candidate']:>7d} of 0..{h['size'] - 1}   {h['hz']:7.1f} Hz (set)\n"
-            f"spot checks: {h['checks']}   hits: {h['hits']}   expected ~{h['expected']:.2f}\n"
-            f"{luck}\n"
-            f"last check: {last}   secret: {sec}\n"
-            f"last FOUND number: {found}"))
-
     def _show_miner(self, m):
-        self._show_hidden(m.get("hidden"))
         self._show_search(m.get("search"))
         set_text(self.l_miner, (
-            f"Time codes added: {m['timecodes_added']} (hidden-number: {m['hidden_timecodes']}, "
-            f"search: {m['search_timecodes']}, factor: {m['factor_timecodes']}, "
-            f"pending {m['timecode_pending']})\n"
+            f"Time codes added: {m['timecodes_added']} (search: {m['search_timecodes']}, "
+            f"factor: {m['factor_timecodes']}, pending {m['timecode_pending']})\n"
+            f"Failure gaps pending (interleaved with successes): {m.get('failures_pending', 0)}\n"
             f"Armed frames (2 evens in a row): {m['armed_frames']}\n"
             f"{'ARMED' if m['last_armed'] else 'not armed'}"
             f"{'' if m['circuit'] else '  [circuit OFF: press Start circuit]'}"))
@@ -3867,7 +3835,8 @@ class App:
         if not self.y_ok:
             messagebox.showerror("Time code", "Fix the time code first (bits 0/1 with | & + only).")
             return
-        self.ctl.update(stop=False, circuit=circuit, timecode_pending=0)
+        self.ctl.update(stop=False, circuit=circuit, timecode_pending=0,
+                        out_ok=0, out_bad=0, out_turn=0)
         self.q = queue.Queue()
         self.q_hist.clear()
         self.x_hist.clear()
@@ -3886,6 +3855,9 @@ class App:
 
     def _close(self):
         self.ctl["stop"] = True
+        self.ctl["inj_timed"] = False
+        if getattr(self, "_timed_stop", None) is not None:
+            self._timed_stop.set()
         self.fsearch.cancel()
         self.hidden.stop()
         self.root.after(150, self.root.destroy)
@@ -3908,24 +3880,19 @@ class App:
                     last = d                           # older frames are skipped, not drawn
                 elif kind == "codes":
                     self._pending_codes = ev[1]        # keep only the newest
-                elif kind == "hidden_hit":
-                    hh = ev[1]
-                    self._log(f"HIDDEN NUMBER GUESSED frame {hh['frame']:5d} x={hh['x']} "
-                              f"candidate={hh['snap']['last_check'][0]} "
-                              f"after {hh['snap']['checks']} checks; time code added")
                 elif kind == "search_hit":
                     sh = ev[1]
                     avg = "n/a" if sh["avg"] is None else f"{sh['avg']:.1f}"
                     val, n = sh["found"]
                     self._log(f"SEARCH FOUND frame {sh['frame']:5d} x={sh['x']} "
                               f"{sh['bits']}-bit secret found in {n} guesses "
-                              f"(avg {avg}); time code added")
+                              f"(avg {avg}); success queued")
                     self._log(f"  number (hex, {val.bit_length()} bit): {val:x}")
                 elif kind == "factor_hit":
                     fh = ev[1]
                     p, q, n = fh["found"]
                     self._log(f"FACTORISATION VERIFIED frame {fh['frame']:5d} x={fh['x']} "
-                              f"p found in {n} queries; time code added")
+                              f"p found in {n} queries; success queued")
                     self._log(f"  p = {short_dec(p, 30)}")
                     self._log(f"  q = {short_dec(q, 30)}")
                 elif kind == "analysis":
@@ -3937,6 +3904,8 @@ class App:
                     messagebox.showerror("Camera", ev[1])
                 elif kind == "info":
                     self._log("# " + ev[1])
+                elif kind == "log":
+                    self._log(ev[1])
                 elif kind == "done":
                     self.b_start.config(state="normal")
                     self.b_prev.config(state="normal")
@@ -3948,7 +3917,6 @@ class App:
         now = time.perf_counter()
         if last is not None:
             self._latest = last
-        # redraw at most ~30 times per second, always from the newest frame
         if getattr(self, "_latest", None) is not None and now - self._last_render >= FRAME_INTERVAL / 1000:
             d, self._latest = self._latest, None
             self._last_render = now
@@ -3982,9 +3950,8 @@ class App:
 
         self.cam_photo = ppm_photo(d["preview"])
         self.cam.itemconfig(self.cam_img, image=self.cam_photo)
-        # fps is smoothed so the number does not flicker every frame
         fps = 1 / d["dt"]
-        self._fps = fps if getattr(self, "_fps", None) is None else 10.9 * self._fps + 10.1 * fps
+        self._fps = fps if getattr(self, "_fps", None) is None else 0.9 * self._fps + 0.1 * fps
         ct = f"{self._fps:.0f} fps   " + (f"moving px: {d['x']}" if d["motion"] else "no motion")
         if self._photo_cache.get("cam_text") != ct:
             self._photo_cache["cam_text"] = ct
@@ -4001,7 +3968,6 @@ class App:
         self._lit("node", d["node"] > self.ctl.get("node_thr", 0.5), f"{d['node']:.2f}")
         self._lit("Y", d["y_bin"],
                   f"[{self.ctl['y']}]  bin {d['y_idx']}={d['y_bin']}"
-                  + (" +HIDDEN" if d.get("hidden_hit") else "")
                   + (" +SEARCH" if d.get("search_hit") else "")
                   + (" +FACTOR" if d.get("factor_hit") else ""))
         ecc_note = f"  ECC {self.ctl.get('q_ecc', 'none')} / flips {d.get('q_flip', 0)}"
@@ -4030,8 +3996,8 @@ class App:
             f"frames {S['frames']}  with motion {S['motion']}\n"
             f"x in L (odd composite): {S['in_L']}  accepted: {S['acc_in_L']}  ({rate:.0%})\n"
             f"x not in L accepted (false accepts): {S['false_acc']}\n"
-            f"time codes added: {S['timecodes_added']} (hidden {S['hidden_timecodes']}, "
-            f"search {S['search_timecodes']}, factor {S['factor_timecodes']})"))
+            f"time codes added: {S['timecodes_added']} (search {S['search_timecodes']}, "
+            f"factor {S['factor_timecodes']})"))
 
     def _frame_log(self, d):
         kind = "odd composite" if d["in_L"] else ("even" if d["x"] % 2 == 0 else "prime/small")
