@@ -19,63 +19,69 @@ Cumulative 10-year deficit: A$5061.5b
 
 --- Programme cut: 2% ---
 Target cut: A$9,623m
-No exact package; closest reachable cut: A$9,538m (-85m)
-Items: ['Agriculture, forestry and fishing', 'Natural disaster relief', 'Contingency reserve']
-Year-1 deficit: A$339.4b
-Year-10 deficit: A$672.2b
-Debt/GDP year 5: 82.2%
-Debt/GDP year 10: 126.9%
-Cumulative 10-year deficit: A$4919.9b
+EXACT package found: A$9,623m
+Items: ['Order: Courts and legal services', 'Housing: Water and sanitation', 'Culture: Public broadcasting', 'Culture: Sport and recreation']
+Decoder: DP fallback (lattice decoder did not converge in 12 frames)
+Year-1 deficit: A$339.3b
+Year-10 deficit: A$672.0b
+Debt/GDP year 5: 82.1%
+Debt/GDP year 10: 126.8%
+Cumulative 10-year deficit: A$4918.6b
 
 --- Programme cut: 5% ---
 Target cut: A$24,058m
-No exact package; closest reachable cut: A$24,011m (-47m)
-Items: ['Agriculture, forestry and fishing', 'Transport and communication', 'Contingency reserve']
+EXACT package found: A$24,058m
+Items: ['GPS: Foreign economic aid', 'GPS: Public debt transactions (non-interest)', 'Order: Police and AFP', 'Order: Corrective services and other', 'Housing: Community development', 'Culture: Public broadcasting', 'Energy: Renewable energy programs']
+Decoder: DP fallback (lattice decoder did not converge in 12 frames)
 Year-1 deficit: A$324.9b
-Year-10 deficit: A$642.4b
+Year-10 deficit: A$642.3b
 Debt/GDP year 5: 79.8%
 Debt/GDP year 10: 122.3%
-Cumulative 10-year deficit: A$4704.9b
+Cumulative 10-year deficit: A$4704.2b
 
 --- Programme cut: 10% ---
 Target cut: A$48,116m
-No exact package; closest reachable cut: A$48,079m (-37m)
-Items: ['General public services', 'Agriculture, forestry and fishing', 'Mining, manufacturing and construction', 'Natural disaster relief', 'Other purposes / residual']
+EXACT package found: A$48,116m
+Items: ['GPS: Legislative and executive affairs', 'Order: Courts and legal services', 'Health: Pharmaceutical benefits', 'Health: Private health insurance rebate', 'Culture: Sport and recreation', 'Mining and resources', 'Transport: Aviation, maritime, communications', 'Other: Residual B']
+Decoder: majority vote (0 flips)
 Year-1 deficit: A$300.8b
-Year-10 deficit: A$592.8b
+Year-10 deficit: A$592.7b
 Debt/GDP year 5: 76.0%
 Debt/GDP year 10: 114.7%
-Cumulative 10-year deficit: A$4347.5b
+Cumulative 10-year deficit: A$4346.9b
 
 --- A$30 billion cut ---
 Target cut: A$30,000m
-No exact package; closest reachable cut: A$29,976m (-24m)
-Items: ['Transport and communication', 'Other economic affairs', 'Natural disaster relief']
+EXACT package found: A$30,000m
+Items: ['GPS: Legislative and executive affairs', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Culture: Arts and heritage', 'Industry support and innovation', 'Mining and resources', 'Transport: Aviation, maritime, communications', 'Contingency: Decisions taken, not yet announced', 'Other: Residual B']
+Decoder: majority vote (0 flips)
 Year-1 deficit: A$318.9b
-Year-10 deficit: A$630.1b
+Year-10 deficit: A$630.0b
 Debt/GDP year 5: 78.9%
 Debt/GDP year 10: 120.4%
-Cumulative 10-year deficit: A$4616.4b
+Cumulative 10-year deficit: A$4616.0b
 
 --- A$50 billion cut ---
 Target cut: A$50,000m
-No exact package; closest reachable cut: A$49,996m (-4m)
-Items: ['Public order and safety', 'Agriculture, forestry and fishing', 'Mining, manufacturing and construction', 'Transport and communication', 'Other economic affairs', 'Natural disaster relief']
+EXACT package found: A$50,000m
+Items: ['GPS: Financial and fiscal affairs', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Defence: R&D, intelligence and other', 'Order: Police and AFP', 'Order: Corrective services and other', 'Education: Vocational and other', 'Health: Private health insurance rebate', 'Housing: Housing assistance']
+Decoder: DP fallback (lattice decoder did not converge in 12 frames)
 Year-1 deficit: A$298.9b
 Year-10 deficit: A$588.8b
 Debt/GDP year 5: 75.7%
 Debt/GDP year 10: 114.1%
-Cumulative 10-year deficit: A$4319.0b
+Cumulative 10-year deficit: A$4318.9b
 
 --- A$100 billion cut ---
 Target cut: A$100,000m
-No exact package; closest reachable cut: A$99,998m (-2m)
-Items: ['General public services', 'Defence', 'Recreation and culture', 'Agriculture, forestry and fishing', 'Other purposes / residual']
+EXACT package found: A$100,000m
+Items: ['GPS: Legislative and executive affairs', 'GPS: General research', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Defence: Navy', 'Health: Public health and other', 'Housing: Housing assistance', 'Energy: Renewable energy programs', 'Energy: Fuel tax credits and petroleum', 'Transport: Roads', 'Transport: Aviation, maritime, communications', 'Economic: Other', 'Disaster: Recovery payments', 'Contingency: Decisions taken, not yet announced', 'Other: Nation-building and special funds']
+Decoder: majority vote (0 flips)
 Year-1 deficit: A$248.9b
 Year-10 deficit: A$485.8b
 Debt/GDP year 5: 67.6%
 Debt/GDP year 10: 98.3%
-Cumulative 10-year deficit: A$3576.4b
+Cumulative 10-year deficit: A$3576.3b
 
 --- Tax rates +1pp ---
 Target cut: A$0m
@@ -125,12 +131,10 @@ Cumulative 10-year deficit: A$5002.8b
 --- Austerity package ---
 Target cut: A$9,538m
 EXACT package found: A$9,538m
-Items: ['Agriculture, forestry and fishing', 'Natural disaster relief', 'Contingency reserve']
-Decoder: majority vote (0 flips)
+Items: ['GPS: General research', 'Culture: Arts and heritage', 'Energy: Transition and grids']
+Decoder: DP fallback (lattice decoder did not converge in 12 frames)
 Year-1 deficit: A$308.2b
 Year-10 deficit: A$607.9b
 Debt/GDP year 5: 77.1%
 Debt/GDP year 10: 117.0%
 Cumulative 10-year deficit: A$4456.3b
-
-Saved detailed results to australia_subset_sum_scenarios.json
