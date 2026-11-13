@@ -1,0 +1,136 @@
+== Australia ==
+Population: 27,600,000
+Nominal GDP: A$2.930 trillion
+GDP per capita: A$106,171
+Freedom score: 80.1
+Gross debt: A$1051.0b (35.9% of GDP)
+=== Australia subset-sum fiscal scenarios ===
+Programme spending available for cuts: A$481,161m
+
+
+--- Baseline ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$348.9b
+Year-10 deficit: A$691.8b
+Debt/GDP year 5: 83.7%
+Debt/GDP year 10: 129.9%
+Cumulative 10-year deficit: A$5061.5b
+
+--- Programme cut: 2% ---
+Target cut: A$9,623m
+No exact package; closest reachable cut: A$9,538m (-85m)
+Items: ['Agriculture, forestry and fishing', 'Natural disaster relief', 'Contingency reserve']
+Year-1 deficit: A$339.4b
+Year-10 deficit: A$672.2b
+Debt/GDP year 5: 82.2%
+Debt/GDP year 10: 126.9%
+Cumulative 10-year deficit: A$4919.9b
+
+--- Programme cut: 5% ---
+Target cut: A$24,058m
+No exact package; closest reachable cut: A$24,011m (-47m)
+Items: ['Agriculture, forestry and fishing', 'Transport and communication', 'Contingency reserve']
+Year-1 deficit: A$324.9b
+Year-10 deficit: A$642.4b
+Debt/GDP year 5: 79.8%
+Debt/GDP year 10: 122.3%
+Cumulative 10-year deficit: A$4704.9b
+
+--- Programme cut: 10% ---
+Target cut: A$48,116m
+No exact package; closest reachable cut: A$48,079m (-37m)
+Items: ['General public services', 'Agriculture, forestry and fishing', 'Mining, manufacturing and construction', 'Natural disaster relief', 'Other purposes / residual']
+Year-1 deficit: A$300.8b
+Year-10 deficit: A$592.8b
+Debt/GDP year 5: 76.0%
+Debt/GDP year 10: 114.7%
+Cumulative 10-year deficit: A$4347.5b
+
+--- A$30 billion cut ---
+Target cut: A$30,000m
+No exact package; closest reachable cut: A$29,976m (-24m)
+Items: ['Transport and communication', 'Other economic affairs', 'Natural disaster relief']
+Year-1 deficit: A$318.9b
+Year-10 deficit: A$630.1b
+Debt/GDP year 5: 78.9%
+Debt/GDP year 10: 120.4%
+Cumulative 10-year deficit: A$4616.4b
+
+--- A$50 billion cut ---
+Target cut: A$50,000m
+No exact package; closest reachable cut: A$49,996m (-4m)
+Items: ['Public order and safety', 'Agriculture, forestry and fishing', 'Mining, manufacturing and construction', 'Transport and communication', 'Other economic affairs', 'Natural disaster relief']
+Year-1 deficit: A$298.9b
+Year-10 deficit: A$588.8b
+Debt/GDP year 5: 75.7%
+Debt/GDP year 10: 114.1%
+Cumulative 10-year deficit: A$4319.0b
+
+--- A$100 billion cut ---
+Target cut: A$100,000m
+No exact package; closest reachable cut: A$99,998m (-2m)
+Items: ['General public services', 'Defence', 'Recreation and culture', 'Agriculture, forestry and fishing', 'Other purposes / residual']
+Year-1 deficit: A$248.9b
+Year-10 deficit: A$485.8b
+Debt/GDP year 5: 67.6%
+Debt/GDP year 10: 98.3%
+Cumulative 10-year deficit: A$3576.4b
+
+--- Tax rates +1pp ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$319.6b
+Year-10 deficit: A$631.5b
+Debt/GDP year 5: 79.0%
+Debt/GDP year 10: 120.6%
+Cumulative 10-year deficit: A$4626.3b
+
+--- Top-class tax +3pp ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$316.4b
+Year-10 deficit: A$624.8b
+Debt/GDP year 5: 78.5%
+Debt/GDP year 10: 119.6%
+Cumulative 10-year deficit: A$4578.5b
+
+--- Transfers -5% ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$317.7b
+Year-10 deficit: A$627.5b
+Debt/GDP year 5: 78.7%
+Debt/GDP year 10: 120.0%
+Cumulative 10-year deficit: A$4597.9b
+
+--- Interest rate +1pp ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$359.4b
+Year-10 deficit: A$760.8b
+Debt/GDP year 5: 86.3%
+Debt/GDP year 10: 137.5%
+Cumulative 10-year deficit: A$5418.1b
+
+--- Freedom score -10 ---
+Target cut: A$0m
+No spending-cut package required.
+Year-1 deficit: A$348.9b
+Year-10 deficit: A$678.1b
+Debt/GDP year 5: 84.6%
+Debt/GDP year 10: 132.4%
+Cumulative 10-year deficit: A$5002.8b
+
+--- Austerity package ---
+Target cut: A$9,538m
+EXACT package found: A$9,538m
+Items: ['Agriculture, forestry and fishing', 'Natural disaster relief', 'Contingency reserve']
+Decoder: majority vote (0 flips)
+Year-1 deficit: A$308.2b
+Year-10 deficit: A$607.9b
+Debt/GDP year 5: 77.1%
+Debt/GDP year 10: 117.0%
+Cumulative 10-year deficit: A$4456.3b
+
+Saved detailed results to australia_subset_sum_scenarios.json
