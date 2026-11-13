@@ -1,50 +1,46 @@
 #!/usr/bin/env python3
 """
-Subset-sum solver v2: scales the paper's "pool noisy frames -> list-decode -> exact verifier"
-pipeline to much larger instances.
+Subset-sum recovery using ONLY the paper's decoding pipeline (no meet-in-the-middle).
 
-What changed versus v1 (the greedy version, which failed at n=50):
+  Paper stage                          Here
+  -----------------------------------  ------------------------------------------------------
+  Oracle commitment c                  instance (a, T); verifier V(x) = [a.x == T]
+  Camera frame / parallel pooling      one randomised LLL reduction of the CJLOSS embedding;
+                                       a reduced row with last coord 0 is a readout of 2x-1:
+                                       +1 / -1 valid bit, 0 = ERASURE (Sec. 2.3), |v|>1 = invalid
+  Vote accumulation (Sec. 4.1)         D_i = sum_t w_t * sign-aligned readout  (vectorised, numpy)
+  Majority decision (ties -> 0)        x_hat_i = [D_i > 0]
+  Chase-type list decoder (Sec. 5.2)   flip <= t bits among the L least-reliable positions,
+                                       candidates tested against the exact verifier
+  Best-first enumeration (Sec. 5.6)    optional: test flip sets in increasing W(S)=sum |D_i|
+  Candidate budget Q_max (Sec. 5.1)    hard cap on verifier calls
 
- LOW-DENSITY regime  (n / log2(max a) < ~0.94)   -> LATTICE FRAMES
-   Each randomised LLL reduction of the Lagarias-Odlyzko / CJLOSS embedding is one "frame".
-   A reduced-basis row with last coordinate 0 is a readout of 2x-1 in {-1,0,+1}^n:
-        +1 / -1  -> a valid bit,     0 -> an ERASURE (the paper's erasure channel, Sec. 2.3)
-   Rows are sign-aligned and pooled (the sufficient statistic D_i), then decoded with the
-   paper's Chase-type search over the least-reliable positions, done exactly by
-   meet-in-the-middle because the sum check exposes a residual.
-
- HIGH-DENSITY regime (many solutions)             -> POSTERIOR-RESTRICTED MITM
-   Fix all but m uncertain items by sampling from the pooled posterior, then solve the
-   remaining m-item problem exactly with a vectorised meet-in-the-middle (2^(m/2) work).
-   With many solutions, a random restriction keeps a solution alive with decent probability.
-
- The verifier is always exact integer arithmetic. The solver can fail (return None) but it
- can never return a wrong answer. It does NOT break NP-hardness: the hard middle band
- (density ~ 1, large n) remains out of reach; see the proof harness for measured limits.
+The decoder never searches the 2^L space exhaustively and never uses meet-in-the-middle:
+it can only fix <= t wrong bits located inside the L least-reliable positions (Sec. 5.3:
+success iff K <= t and E subset of U).
+Frames come from lattice reduction because the greedy heuristic of v1 was not an informative
+channel (it carried no usable per-bit signal at n >= 50).
 """
+import heapq
+import itertools
 import json
 import math
 import random
 import sys
 import time
+from math import comb
 from typing import List, Optional, Sequence
 
 import numpy as np
 
 
-# ----------------------------------------------------------------------------
-# Exact verifier (the "commitment")
-# ----------------------------------------------------------------------------
 def verify(a: Sequence[int], T: int, x: Sequence[int]) -> bool:
-    return len(a) == len(x) and all(v in (0, 1) for v in x) and \
-        sum(ai for ai, xi in zip(a, x) if xi) == T
+    return len(a) == len(x) and sum(ai for ai, xi in zip(a, x) if xi) == T
 
 
-# ----------------------------------------------------------------------------
-# Integral LLL (Cohen, Alg. 2.6.7). Exact big-integer arithmetic, delta = 0.99.
-# ----------------------------------------------------------------------------
-def lll(B: List[List[int]], dn: int = 99, dd: int = 100) -> List[List[int]]:
-    B = [row[:] for row in B]
+# ---------------------------------------------------------------- integral LLL (Cohen 2.6.7)
+def lll(B, dn=99, dd=100):
+    B = [r[:] for r in B]
     n = len(B)
     dot = lambda u, v: sum(p * q for p, q in zip(u, v))
     D = [1] + [0] * n
@@ -94,71 +90,13 @@ def lll(B: List[List[int]], dn: int = 99, dd: int = 100) -> List[List[int]]:
     return B
 
 
-# ----------------------------------------------------------------------------
-# Meet-in-the-middle on a subset of items (numpy, int64)
-# ----------------------------------------------------------------------------
-def _all_sums(ws):
-    s = np.zeros(1, dtype=np.int64)
-    for w in ws:
-        s = np.concatenate([s, s + np.int64(w)])
-    return s                                   # index bit j  <->  item j
-
-
-def mitm_exact(ws: List[int], target: int):
-    """Subset of ws (list of Python ints, total < 2^62) summing to target, or None."""
-    h = len(ws) // 2
-    L, R = _all_sums(ws[:h]), _all_sums(ws[h:])
-    order = np.argsort(L, kind="stable")
-    Ls = L[order]
-    need = np.int64(target) - R
-    pos = np.searchsorted(Ls, need)
-    pos[pos >= len(Ls)] = len(Ls) - 1
-    hit = np.nonzero(Ls[pos] == need)[0]
-    if len(hit) == 0:
-        return None
-    ri = int(hit[0])
-    li = int(order[pos[ri]])
-    out = [(li >> j) & 1 for j in range(h)] + [(ri >> j) & 1 for j in range(len(ws) - h)]
-    return out
-
-
-def flip_search_mitm(a, T, xhat, margins, L):
-    """Chase-type decoding done exactly: choose which of the L weakest bits to flip."""
-    n = len(a)
-    L = min(L, n)
-    U = sorted(range(n), key=lambda i: margins[i])[:L]
-    s0 = sum(ai for ai, xi in zip(a, xhat) if xi)
-    if s0 == T:
-        return list(xhat)
-    delta = [(-a[i] if xhat[i] else a[i]) for i in U]
-    # bring to non-negative weights for the numpy routine: flip sign trick
-    off = sum(-d for d in delta if d < 0)
-    ws = [abs(d) for d in delta]
-    # sum_{S} delta_i = sum_{S, d>0} |d| - sum_{S, d<0} |d|;  substitute y_i = 1-s_i for d<0
-    neg = [d < 0 for d in delta]
-    need = (T - s0) + off                    # = sum over (s_i if d>0 else 1-s_i) * |d_i|
-    if need < 0 or need > sum(ws) or sum(ws) >= 2 ** 62:
-        return None
-    sol = mitm_exact(ws, need)
-    if sol is None:
-        return None
-    y = list(xhat)
-    for j, i in enumerate(U):
-        flip = (1 - sol[j]) if neg[j] else sol[j]
-        if flip:
-            y[i] ^= 1
-    return y
-
-
-# ----------------------------------------------------------------------------
-# LOW-DENSITY: lattice frames -> erasure channel -> pooling -> decoding
-# ----------------------------------------------------------------------------
+# ---------------------------------------------------------------- one frame
 def lattice_frame(a, T, rng):
-    """One 'exposure': randomised LLL of the CJLOSS embedding. Returns list of rows (e, last)."""
+    """Randomised LLL -> matrix of readouts E (rows x n), entries 0 (erasure) / +-1 / other(invalid)."""
     n = len(a)
     perm = list(range(n))
     rng.shuffle(perm)
-    Nw = int(math.isqrt(n)) + 1 + rng.randrange(0, 3)    # random embedding scale
+    Nw = math.isqrt(n) + 1 + rng.randrange(0, 3)
     B = []
     for r, i in enumerate(perm):
         row = [0] * (n + 1)
@@ -167,140 +105,151 @@ def lattice_frame(a, T, rng):
         B.append(row)
     B.append([1] * n + [Nw * T])
     R = lll(B)
-    inv = {r: i for r, i in enumerate(perm)}
     rows = []
     for v in R:
         if v[n] != 0:
             continue
         e = [0] * n
         for r in range(n):
-            e[inv[r]] = v[r]
-        rows.append(e)
+            e[perm[r]] = v[r]
+        if any(e):
+            rows.append(e)
     return rows
 
 
-def solve_lattice(a, T, max_frames=12, L=22, seed=None, deadline=None):
+# ---------------------------------------------------------------- pooling (vectorised)
+class Pool:
+    """Sufficient statistic D_i plus the paper's channel diagnostics."""
+
+    def __init__(self, a, T):
+        self.a = np.array([float(x) for x in a])
+        self.T = float(T)
+        self.n = len(a)
+        self.D = np.zeros(self.n)
+        self.valid_obs = np.zeros(self.n, dtype=int)    # N_i: valid observations of cell i
+        self.rows_seen = 0
+        self.cover_frame = None
+
+    def add_frame(self, rows, frame_no):
+        if not rows:
+            return
+        E = np.array(rows, dtype=np.int64)                      # (rows, n)
+        # confidence gate (Sec. 2.3): a readout with any |v| > 1 is out of range -> the whole
+        # row is invalid and is dropped (erased), instead of polluting the vote
+        E = E[np.abs(E).max(axis=1) <= 1]
+        if len(E) == 0:
+            return
+        V = (np.abs(E) == 1)                                    # valid readouts
+        S = np.where(V, E, 0).astype(float)                     # erased / invalid -> 0
+        # sign alignment: lattice vectors are defined up to +-1; pick the sign whose hard
+        # decode lands closer to T (one batched matrix-vector product, no per-bit loop)
+        plus = ((S > 0) * self.a).sum(axis=1)
+        minus = ((S < 0) * self.a).sum(axis=1)
+        sgn = np.where(np.abs(plus - self.T) <= np.abs(minus - self.T), 1.0, -1.0)
+        S = S * sgn[:, None]
+        w = V.mean(axis=1) ** 2                                 # reveal-rate weighting
+        self.D += (S * w[:, None]).sum(axis=0)
+        self.valid_obs += V.sum(axis=0).astype(int)
+        self.rows_seen += len(E)
+        if self.cover_frame is None and (self.valid_obs > 0).all():
+            self.cover_frame = frame_no
+
+    @property
+    def reveal_rate(self):
+        return float((self.valid_obs > 0).mean())
+
+    def hard_decode(self):
+        return [1 if d > 0 else 0 for d in self.D]               # ties -> 0 (paper Sec. 4.3)
+
+    def margins(self):
+        return np.abs(self.D)
+
+
+# ---------------------------------------------------------------- Chase decoding
+def chase(a, T, xhat, margins, L=16, t=4, budget=200_000, best_first=False):
+    """Returns (solution or None, candidates_tested). No meet-in-the-middle."""
+    n = len(a)
+    L = min(L, n)
+    # ascending reliability; np.argsort stable -> deterministic ties (paper Sec. 9, item 5)
+    U = [int(i) for i in np.argsort(margins, kind="stable")[:L]]
+    s0 = sum(ai for ai, xi in zip(a, xhat) if xi)
+    tested = 1
+    if s0 == T:
+        return list(xhat), tested
+    delta = [(-a[i] if xhat[i] else a[i]) for i in U]           # effect of flipping U[j]
+
+    if not best_first:                                          # Sec. 5.2: by cardinality
+        for k in range(1, min(t, L) + 1):
+            for S in itertools.combinations(range(L), k):
+                tested += 1
+                if tested > budget:
+                    return None, tested
+                if s0 + sum(delta[j] for j in S) == T:
+                    y = list(xhat)
+                    for j in S:
+                        y[U[j]] ^= 1
+                    return y, tested
+        return None, tested
+
+    # Sec. 5.6: best-first, lowest W(S) = sum of margins first, via a heap
+    w = [float(margins[i]) for i in U]
+    heap = [(w[0], (0,))]
+    while heap:
+        cost, S = heapq.heappop(heap)
+        tested += 1
+        if tested > budget:
+            return None, tested
+        if s0 + sum(delta[j] for j in S) == T:
+            y = list(xhat)
+            for j in S:
+                y[U[j]] ^= 1
+            return y, tested
+        last = S[-1]
+        if last + 1 < L:
+            heapq.heappush(heap, (cost - w[last] + w[last + 1], S[:-1] + (last + 1,)))   # shift
+            if len(S) < t:
+                heapq.heappush(heap, (cost + w[last + 1], S + (last + 1,)))              # extend
+    return None, tested
+
+
+# ---------------------------------------------------------------- top level
+def solve(a, T, max_frames=12, L=16, t=4, q_max=200_000, best_first=True,
+          seed=None, time_limit=120.0):
     rng = random.Random(seed)
-    n = len(a)
-    D = [0.0] * n
-    for frame in range(1, max_frames + 1):
-        rows = lattice_frame(a, T, rng)
-        for e in rows:
-            for sgn in (1, -1):                       # the +/- ambiguity of a lattice vector
-                f = [sgn * v for v in e]
-                if all(abs(v) == 1 for v in f):       # a clean readout -> try directly
-                    x = [1 if v > 0 else 0 for v in f]
-                    if verify(a, T, x):
-                        return x, {"frames": frame, "how": "clean short vector"}
-        # pool: align signs by closeness of the hard decode to the target, accumulate votes
-        for e in rows:
-            if all(v == 0 for v in e) or max(abs(v) for v in e) > 2:
-                continue
-            best = min((1, -1), key=lambda s: abs(
-                sum(ai for ai, v in zip(a, e) if s * v > 0) - T))
-            for i, v in enumerate(e):
-                D[i] += best * v
-        xhat = [1 if d > 0 else 0 for d in D]
-        y = flip_search_mitm(a, T, xhat, [abs(d) for d in D], L)
-        if y is not None and verify(a, T, y):
-            return y, {"frames": frame, "how": f"pooled votes + MITM list decode (L={L})"}
-        if deadline and time.time() > deadline:
-            break
-    return None, {"frames": max_frames, "how": "lattice failed"}
-
-
-# ----------------------------------------------------------------------------
-# HIGH-DENSITY: posterior-restricted MITM
-# ----------------------------------------------------------------------------
-def greedy_votes(a, T, rng, cycles=60):
-    n = len(a)
-    D = [0.0] * n
-    scale = max(1.0, sum(a) / n)
-    for _ in range(cycles):
-        order = sorted(range(n), key=lambda i: -a[i] * (1 + 0.5 * rng.random()))
-        x, s = [0] * n, 0
-        for i in order:
-            if s + a[i] <= T:
-                x[i] = 1
-                s += a[i]
-        w = math.exp(-abs(s - T) / scale)
-        for i in range(n):
-            D[i] += w if x[i] else -w
-    return D
-
-
-def solve_dense(a, T, m=None, max_trials=400, seed=None, deadline=None):
-    rng = random.Random(seed)
-    n = len(a)
-    if sum(a) >= 2 ** 62:
-        return None, {"trials": 0, "how": "weights too large for int64 dense path"}
-    bits = max(a).bit_length()
-    m = m or min(n, bits + 3, 44)
-    D = greedy_votes(a, T, rng)
-    sc = (max(abs(d) for d in D) or 1.0)
-    for trial in range(1, max_trials + 1):
-        # free set: random, biased toward uncertain items (small |D|)
-        keyed = sorted(range(n), key=lambda i: abs(D[i]) / sc + rng.random())
-        free, fixed = keyed[:m], keyed[m:]
-        s_fix, x = 0, [0] * n
-        for i in fixed:
-            p = 0.5 + 0.5 * math.tanh(2.0 * D[i] / sc)   # posterior (flat if votes useless)
-            if rng.random() < p:
-                x[i] = 1
-                s_fix += a[i]
-        Tp = T - s_fix
-        ws = [a[i] for i in free]
-        if Tp < 0 or Tp > sum(ws):
-            continue
-        sol = mitm_exact(ws, Tp)
-        if sol is not None:
-            for j, i in enumerate(free):
-                x[i] = sol[j]
-            if verify(a, T, x):
-                return x, {"trials": trial, "how": f"restricted MITM (m={m} free of n={n})"}
-        if deadline and time.time() > deadline:
-            break
-    return None, {"trials": max_trials, "how": "dense failed"}
-
-
-# ----------------------------------------------------------------------------
-# Auto dispatcher
-# ----------------------------------------------------------------------------
-def solve(a, T, seed=None, time_limit=120.0):
-    n = len(a)
-    bits = max(a).bit_length()
-    density = n / bits
+    pool = Pool(a, T)
     t_end = time.time() + time_limit
-    info = {"n": n, "bits": bits, "density": round(density, 3)}
-    if n <= 40 and sum(a) < 2 ** 62:
-        x = mitm_exact(list(a), T)
-        if x is not None and verify(a, T, x):
-            return x, {**info, "how": "exact MITM (n<=40)"}
-        return None, {**info, "how": "exact MITM: no solution"}
-    order = ["lattice", "dense"] if density < 0.94 else ["dense", "lattice"]
-    for method in order:
-        if time.time() > t_end:
+    total_tested = 0
+    last_key = None
+    info = {}
+    for f in range(1, max_frames + 1):
+        rows = lattice_frame(a, T, rng)
+        pool.add_frame(rows, f)
+        xhat = pool.hard_decode()
+        if verify(a, T, xhat):
+            return xhat, {"frames": f, "how": "majority vote (0 flips)", "candidates": total_tested + 1,
+                          "cover_frame": pool.cover_frame, "reveal_rate": pool.reveal_rate}
+        if pool.cover_frame is None:                             # decoder waits for full cover
+            continue
+        key = (tuple(xhat), tuple(np.argsort(pool.margins(), kind="stable")[:L]))
+        if key != last_key:
+            y, tested = chase(a, T, xhat, pool.margins(), L, t, q_max - total_tested, best_first)
+            total_tested += tested
+            last_key = key
+            if y is not None and verify(a, T, y):
+                return y, {"frames": f, "how": f"Chase ({'best-first' if best_first else 'by weight'}, "
+                           f"L={L}, t={t})", "candidates": total_tested,
+                           "cover_frame": pool.cover_frame, "reveal_rate": pool.reveal_rate}
+        if total_tested >= q_max or time.time() > t_end:
             break
-        if method == "lattice":
-            x, i2 = solve_lattice(a, T, seed=seed, deadline=t_end)
-        else:
-            x, i2 = solve_dense(a, T, seed=seed, deadline=t_end)
-        if x is not None and verify(a, T, x):
-            return x, {**info, **i2}
-    return None, {**info, "how": "failed"}
+    return None, {"frames": f, "how": "failed", "candidates": total_tested,
+                  "cover_frame": pool.cover_frame, "reveal_rate": pool.reveal_rate}
 
 
-# ----------------------------------------------------------------------------
-# PROOF HARNESS
-# ----------------------------------------------------------------------------
-def independent_check(a, T, x):
-    """Re-verification written separately from verify(): plain loop, Python big ints."""
-    total = 0
-    for i in range(len(a)):
-        assert x[i] in (0, 1)
-        if x[i] == 1:
-            total += a[i]
-    return total == T, total
+# ---------------------------------------------------------------- predictions & proof harness
+def predicted_budget(L, t, q_max):
+    V = sum(comb(L, k) for k in range(t + 1))
+    return {"V(L,t)": V, "cycles_to_Qmax": math.ceil(q_max / V),
+            "False-accept bound": "0 (exact integer verifier, no hash collisions)"}
 
 
 def planted(n, bits, seed):
@@ -310,41 +259,84 @@ def planted(n, bits, seed):
     return a, sum(ai for ai, xi in zip(a, x) if xi)
 
 
-def prove(configs, seeds=3, time_limit=150.0, out="proof_results.json"):
-    results = []
-    print(f"{'n':>4} {'bits':>4} {'dens':>5} {'seed':>4} {'ok':>5} {'sec':>7}  method")
-    print("-" * 78)
+def independent_check(a, T, x):
+    total = 0
+    for i in range(len(a)):
+        assert x[i] in (0, 1)
+        if x[i]:
+            total += a[i]
+    return total == T, total
+
+
+def prove(configs, seeds=3, out="proof_paper_results.json", **kw):
+    rows = []
+    print(f"{'n':>4} {'bits':>4} {'dens':>5} {'seed':>4} {'ok':>5} {'frm':>3} {'cov':>3} {'cand':>7} {'sec':>6}  how")
+    print("-" * 92)
     for n, bits in configs:
         for sd in range(seeds):
-            a, T = planted(n, bits, seed=1000 * n + sd)
+            a, T = planted(n, bits, 1000 * n + 7 * bits + sd)
             t0 = time.time()
-            x, info = solve(a, T, seed=sd, time_limit=time_limit)
+            x, info = solve(a, T, seed=sd, **kw)
             dt = time.time() - t0
-            ok = False
-            tot = None
+            ok, tot = (False, None)
             if x is not None:
                 ok, tot = independent_check(a, T, x)
-            print(f"{n:>4} {bits:>4} {n/bits:>5.2f} {sd:>4} {str(ok):>5} {dt:>7.2f}  {info['how']}")
-            results.append({"n": n, "bits": bits, "seed": sd, "solved": ok, "seconds": round(dt, 3),
-                            "method": info["how"], "target": T, "achieved_sum": tot,
-                            "chosen_indices": [i for i, v in enumerate(x or []) if v]})
-    # negative control: impossible target must never be "solved"
-    a, T = planted(60, 120, seed=7)
-    x, info = solve(a, sum(a) + 1, seed=0, time_limit=20)
-    neg_ok = x is None
-    print(f"\nnegative control (target > sum of all weights): returned None = {neg_ok}")
-    with open(out, "w") as f:
-        json.dump({"results": results, "negative_control_passed": neg_ok}, f, indent=1)
-    solved = sum(r["solved"] for r in results)
-    print(f"\nsolved {solved}/{len(results)} instances; every success re-verified with exact integer sums.")
-    return results
+            print(f"{n:>4} {bits:>4} {n/bits:>5.2f} {sd:>4} {str(ok):>5} {info['frames']:>3} "
+                  f"{str(info['cover_frame']):>3} {info['candidates']:>7} {dt:>6.1f}  {info['how']}")
+            rows.append({"n": n, "bits": bits, "seed": sd, "solved": ok, "seconds": round(dt, 2),
+                         "target": T, "achieved_sum": tot, **info,
+                         "indices": [i for i, v in enumerate(x or []) if v]})
+    a, T = planted(60, 120, 7)
+    x, _ = solve(a, sum(a) + 1, seed=0, max_frames=3, time_limit=30)
+    print(f"\nnegative control (unreachable target) -> None: {x is None}")
+    json.dump({"results": rows, "negative_control_passed": x is None}, open(out, "w"), indent=1)
+    print(f"solved {sum(r['solved'] for r in rows)}/{len(rows)}; each re-summed with exact integers.")
+    return rows
+
+
+def validate_decoder(m=56, r=0.45, eps=0.02, trials=200, max_frames=60, L=16, t=4,
+                     best_first=False, seed=0):
+    """
+    DECODER VALIDATION, not a solver: frames are synthetic (the paper's Sec. 2.5 channel),
+    generated from a planted solution, so this only tests pooling + Chase against the
+    paper's predictions (cover time ~ (ln m + gamma)/(-ln(1-r)); success shortly after).
+    """
+    rng = random.Random(seed)
+    nrng = np.random.default_rng(seed)
+    cover, success, used = [], [], []
+    for _ in range(trials):
+        a = [rng.getrandbits(40) | 1 for _ in range(m)]
+        x = np.array([rng.randint(0, 1) for _ in range(m)])
+        T = int(sum(ai for ai, xi in zip(a, x) if xi))
+        ones = np.zeros(m, int); zeros = np.zeros(m, int)
+        cov = None
+        for f in range(1, max_frames + 1):
+            reveal = nrng.random(m) < r
+            flip = nrng.random(m) < eps
+            obs = x ^ flip
+            ones += reveal & (obs == 1)
+            zeros += reveal & (obs == 0)
+            if cov is None and ((ones + zeros) > 0).all():
+                cov = f
+            if cov is None:
+                continue
+            Dv = ones - zeros
+            xh = [1 if d > 0 else 0 for d in Dv]
+            y, _ = chase(a, T, xh, np.abs(Dv), L, t, 200_000, best_first)
+            if y is not None and verify(a, T, y):
+                cover.append(cov); success.append(f); break
+    return {"trials": trials, "solved": len(success),
+            "mean_cover_frames": round(float(np.mean(cover)), 2) if cover else None,
+            "mean_frames_to_solve": round(float(np.mean(success)), 2) if success else None,
+            "predicted_cover": round((math.log(m) + 0.5772) / -math.log(1 - r), 2)}
 
 
 if __name__ == "__main__":
-    quick = "--quick" in sys.argv
-    cfg = [(30, 20), (40, 24),                       # small / exact
-           (50, 32), (56, 40),                       # dense regime (v1 failed here)
-           (40, 100), (60, 130), (80, 200), (100, 400)]   # low density, up to 400-bit weights
-    if "--big" in sys.argv:
-        cfg += [(64, 48)]                            # dense, ~100 s each in pure Python
+    print("Predicted budget (L=16,t=4,Qmax=2e5):", predicted_budget(16, 4, 200_000), "\n")
+    cfg = [(30, 30), (40, 55), (50, 80), (60, 110), (60, 130), (80, 200), (100, 400), (120, 600), (140, 800)]
+    if "--hard" in sys.argv:
+        cfg = [(30, 30), (40, 45), (40, 55), (50, 60), (60, 75), (60, 90)]
     prove(cfg, seeds=2)
+    print("\nDecoder validation on the paper's synthetic channel (planted-noise frames):")
+    print(" by weight :", validate_decoder(best_first=False))
+    print(" best-first:", validate_decoder(best_first=True))
