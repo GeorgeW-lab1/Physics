@@ -1,140 +1,1801 @@
-== Australia ==
-Population: 27,600,000
-Nominal GDP: A$2.930 trillion
-GDP per capita: A$106,171
-Freedom score: 80.1
-Gross debt: A$1051.0b (35.9% of GDP)
-=== Australia subset-sum fiscal scenarios ===
-Programme spending available for cuts: A$481,161m
+=== 2% (A$9.6b): target 9,623 ===
+exact packages that exist (DP count): 9  of 2^50 = 1,125,899,906,842,624
+decoder: 1/60 attempts hit, 1 DISTINCT packages, 0.9s
+packages sparing Health+Defence+Education: 1/1
+  [5 items] Culture: Sport and recreation; Mining and resources; Transport: Aviation, maritime, communications; Disaster: Mitigation; Other: Residual B
 
+=== A$30b: target 30,000 ===
+exact packages that exist (DP count): 48,820  of 2^50 = 1,125,899,906,842,624
+decoder: 29/60 attempts hit, 29 DISTINCT packages, 0.7s
+packages sparing Health+Defence+Education: 15/29
+  [6 items] GPS: Financial and fiscal affairs; GPS: Foreign economic aid; Order: Police and AFP; Housing: Water and sanitation; Industry support and innovation; Transport: Roads
+  [6 items] GPS: General research; Defence: Navy; Culture: Arts and heritage; Energy: Renewable energy programs; Economic: Other; Disaster: Mitigation
+  [7 items] GPS: Public debt transactions (non-interest); Order: Courts and legal services; Order: Corrective services and other; Health: Private health insurance rebate; Energy: Renewable energy programs; Energy: Fuel tax credits and petroleum; Forestry and fishing
 
---- Baseline ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$348.9b
-Year-10 deficit: A$691.8b
-Debt/GDP year 5: 83.7%
-Debt/GDP year 10: 129.9%
-Cumulative 10-year deficit: A$5061.5b
+=== A$50b: target 50,000 ===
+exact packages that exist (DP count): 3,064,432  of 2^50 = 1,125,899,906,842,624
+decoder: 37/60 attempts hit, 37 DISTINCT packages, 0.6s
+packages sparing Health+Defence+Education: 6/37
+  [6 items] GPS: General services; Defence: Army; Health: Private health insurance rebate; Transport: Aviation, maritime, communications; Intergov: Other general revenue assistance; Disaster: Mitigation
+  [7 items] GPS: General research; Health: Hospital funding; Industry support and innovation; Mining and resources; Transport: Rail and public transport; Disaster: Recovery payments; Other: Residual A
+  [8 items] Health: Public health and other; Housing: Housing assistance; Housing: Water and sanitation; Forestry and fishing; Economic: Labour and employment services; Disaster: Recovery payments; Contingency: Economic and policy; Other: Nation-building and special funds
 
---- Programme cut: 2% ---
-Target cut: A$9,623m
-EXACT package found: A$9,623m
-Items: ['Order: Courts and legal services', 'Housing: Water and sanitation', 'Culture: Public broadcasting', 'Culture: Sport and recreation']
-Decoder: DP fallback (lattice decoder did not converge in 12 frames)
-Year-1 deficit: A$339.3b
-Year-10 deficit: A$672.0b
-Debt/GDP year 5: 82.1%
-Debt/GDP year 10: 126.8%
-Cumulative 10-year deficit: A$4918.6b
-
---- Programme cut: 5% ---
-Target cut: A$24,058m
-EXACT package found: A$24,058m
-Items: ['GPS: Foreign economic aid', 'GPS: Public debt transactions (non-interest)', 'Order: Police and AFP', 'Order: Corrective services and other', 'Housing: Community development', 'Culture: Public broadcasting', 'Energy: Renewable energy programs']
-Decoder: DP fallback (lattice decoder did not converge in 12 frames)
-Year-1 deficit: A$324.9b
-Year-10 deficit: A$642.3b
-Debt/GDP year 5: 79.8%
-Debt/GDP year 10: 122.3%
-Cumulative 10-year deficit: A$4704.2b
-
---- Programme cut: 10% ---
-Target cut: A$48,116m
-EXACT package found: A$48,116m
-Items: ['GPS: Legislative and executive affairs', 'Order: Courts and legal services', 'Health: Pharmaceutical benefits', 'Health: Private health insurance rebate', 'Culture: Sport and recreation', 'Mining and resources', 'Transport: Aviation, maritime, communications', 'Other: Residual B']
-Decoder: majority vote (0 flips)
-Year-1 deficit: A$300.8b
-Year-10 deficit: A$592.7b
-Debt/GDP year 5: 76.0%
-Debt/GDP year 10: 114.7%
-Cumulative 10-year deficit: A$4346.9b
-
---- A$30 billion cut ---
-Target cut: A$30,000m
-EXACT package found: A$30,000m
-Items: ['GPS: Legislative and executive affairs', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Culture: Arts and heritage', 'Industry support and innovation', 'Mining and resources', 'Transport: Aviation, maritime, communications', 'Contingency: Decisions taken, not yet announced', 'Other: Residual B']
-Decoder: majority vote (0 flips)
-Year-1 deficit: A$318.9b
-Year-10 deficit: A$630.0b
-Debt/GDP year 5: 78.9%
-Debt/GDP year 10: 120.4%
-Cumulative 10-year deficit: A$4616.0b
-
---- A$50 billion cut ---
-Target cut: A$50,000m
-EXACT package found: A$50,000m
-Items: ['GPS: Financial and fiscal affairs', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Defence: R&D, intelligence and other', 'Order: Police and AFP', 'Order: Corrective services and other', 'Education: Vocational and other', 'Health: Private health insurance rebate', 'Housing: Housing assistance']
-Decoder: DP fallback (lattice decoder did not converge in 12 frames)
-Year-1 deficit: A$298.9b
-Year-10 deficit: A$588.8b
-Debt/GDP year 5: 75.7%
-Debt/GDP year 10: 114.1%
-Cumulative 10-year deficit: A$4318.9b
-
---- A$100 billion cut ---
-Target cut: A$100,000m
-EXACT package found: A$100,000m
-Items: ['GPS: Legislative and executive affairs', 'GPS: General research', 'GPS: General services', 'GPS: Public debt transactions (non-interest)', 'Defence: Navy', 'Health: Public health and other', 'Housing: Housing assistance', 'Energy: Renewable energy programs', 'Energy: Fuel tax credits and petroleum', 'Transport: Roads', 'Transport: Aviation, maritime, communications', 'Economic: Other', 'Disaster: Recovery payments', 'Contingency: Decisions taken, not yet announced', 'Other: Nation-building and special funds']
-Decoder: majority vote (0 flips)
-Year-1 deficit: A$248.9b
-Year-10 deficit: A$485.8b
-Debt/GDP year 5: 67.6%
-Debt/GDP year 10: 98.3%
-Cumulative 10-year deficit: A$3576.3b
-
---- Tax rates +1pp ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$319.6b
-Year-10 deficit: A$631.5b
-Debt/GDP year 5: 79.0%
-Debt/GDP year 10: 120.6%
-Cumulative 10-year deficit: A$4626.3b
-
---- Top-class tax +3pp ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$316.4b
-Year-10 deficit: A$624.8b
-Debt/GDP year 5: 78.5%
-Debt/GDP year 10: 119.6%
-Cumulative 10-year deficit: A$4578.5b
-
---- Transfers -5% ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$317.7b
-Year-10 deficit: A$627.5b
-Debt/GDP year 5: 78.7%
-Debt/GDP year 10: 120.0%
-Cumulative 10-year deficit: A$4597.9b
-
---- Interest rate +1pp ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$359.4b
-Year-10 deficit: A$760.8b
-Debt/GDP year 5: 86.3%
-Debt/GDP year 10: 137.5%
-Cumulative 10-year deficit: A$5418.1b
-
---- Freedom score -10 ---
-Target cut: A$0m
-No spending-cut package required.
-Year-1 deficit: A$348.9b
-Year-10 deficit: A$678.1b
-Debt/GDP year 5: 84.6%
-Debt/GDP year 10: 132.4%
-Cumulative 10-year deficit: A$5002.8b
-
---- Austerity package ---
-Target cut: A$9,538m
-EXACT package found: A$9,538m
-Items: ['GPS: General research', 'Culture: Arts and heritage', 'Energy: Transition and grids']
-Decoder: DP fallback (lattice decoder did not converge in 12 frames)
-Year-1 deficit: A$308.2b
-Year-10 deficit: A$607.9b
-Debt/GDP year 5: 77.1%
-Debt/GDP year 10: 117.0%
-Cumulative 10-year deficit: A$4456.3b
+{
+ "2% (A$9.6b)": {
+  "target": 9623,
+  "exact_packages_in_space_DP": 9,
+  "distinct_found_by_decoder": 1,
+  "attempts": 60,
+  "decoder_hits": 1,
+  "seconds": 0.9,
+  "packages": [
+   {
+    "items": [
+     "Culture: Sport and recreation",
+     "Mining and resources",
+     "Transport: Aviation, maritime, communications",
+     "Disaster: Mitigation",
+     "Other: Residual B"
+    ],
+    "n_items": 5,
+    "by_function_aud_m": {
+     "Culture": 2192,
+     "Mining and resources": 2358,
+     "Transport": 3794,
+     "Disaster": 353,
+     "Other": 926
+    },
+    "spares_health_defence_education": true
+   }
+  ]
+ },
+ "A$30b": {
+  "target": 30000,
+  "exact_packages_in_space_DP": 48820,
+  "distinct_found_by_decoder": 29,
+  "attempts": 60,
+  "decoder_hits": 29,
+  "seconds": 0.7,
+  "packages": [
+   {
+    "items": [
+     "GPS: General services",
+     "Housing: Water and sanitation",
+     "Culture: Sport and recreation",
+     "Agriculture",
+     "Economic: Other",
+     "Intergov: Local government assistance",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Housing": 2616,
+     "Culture": 2192,
+     "Agriculture": 3126,
+     "Economic": 4098,
+     "Intergov": 9772,
+     "Disaster": 353,
+     "Contingency": 2300,
+     "Other": 2902
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "Housing: Housing assistance",
+     "Culture: Public broadcasting",
+     "Energy: Renewable energy programs",
+     "Industry support and innovation",
+     "Mining and resources",
+     "Transport: Rail and public transport",
+     "Economic: Tourism and trade",
+     "Disaster: Recovery payments",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Housing": 5712,
+     "Culture": 1413,
+     "Energy": 5034,
+     "Industry support and innovation": 3205,
+     "Mining and resources": 2358,
+     "Transport": 4626,
+     "Economic": 4238,
+     "Disaster": 512,
+     "Other": 2902
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Order: Corrective services and other",
+     "Housing: Housing assistance",
+     "Culture: Arts and heritage",
+     "Energy: Renewable energy programs",
+     "Forestry and fishing",
+     "Mining and resources",
+     "Transport: Aviation, maritime, communications",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Order": 2189,
+     "Housing": 5712,
+     "Culture": 2687,
+     "Energy": 5034,
+     "Forestry and fishing": 1622,
+     "Mining and resources": 2358,
+     "Transport": 3794,
+     "Disaster": 353,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Housing: Community development",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Energy: Transition and grids",
+     "Transport: Aviation, maritime, communications",
+     "Intergov: Local government assistance",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Housing": 5742,
+     "Culture": 1413,
+     "Energy": 2900,
+     "Transport": 3794,
+     "Intergov": 9772,
+     "Other": 2428
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Defence: Air Force",
+     "Order: Courts and legal services",
+     "Economic: Other",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Defence": 14619,
+     "Order": 3402,
+     "Economic": 4098,
+     "Disaster": 512,
+     "Contingency": 2300,
+     "Other": 2428
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "Order: Courts and legal services",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Industry support and innovation",
+     "Economic: Labour and employment services",
+     "Other: Residual B"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 8317,
+     "Order": 3402,
+     "Culture": 2687,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Industry support and innovation": 3205,
+     "Economic": 5437,
+     "Other": 926
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Defence: R&D, intelligence and other",
+     "Culture: Sport and recreation",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Economic: Tourism and trade",
+     "Economic: Other",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Defence": 9351,
+     "Culture": 2192,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Economic": 8336,
+     "Disaster": 353,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Order: Courts and legal services",
+     "Order: Police and AFP",
+     "Housing: Housing assistance",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Forestry and fishing",
+     "Transport: Roads"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Order": 7520,
+     "Housing": 5712,
+     "Culture": 2687,
+     "Energy": 2900,
+     "Forestry and fishing": 1622,
+     "Transport": 6918
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Courts and legal services",
+     "Order: Corrective services and other",
+     "Health: Private health insurance rebate",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Forestry and fishing"
+    ],
+    "n_items": 7,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Order": 5591,
+     "Health": 7128,
+     "Energy": 12307,
+     "Forestry and fishing": 1622
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Health: Private health insurance rebate",
+     "Energy: Fuel tax credits and petroleum",
+     "Agriculture",
+     "Transport: Aviation, maritime, communications",
+     "Contingency: Economic and policy",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Health": 7128,
+     "Energy": 7273,
+     "Agriculture": 3126,
+     "Transport": 3794,
+     "Contingency": 2300,
+     "Other": 2428
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "GPS: General services",
+     "GPS: Public debt transactions (non-interest)",
+     "Defence: R&D, intelligence and other",
+     "Culture: Sport and recreation",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Forestry and fishing",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 9944,
+     "Defence": 9351,
+     "Culture": 2192,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Disaster": 865
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: General services",
+     "Order: Police and AFP",
+     "Culture: Sport and recreation",
+     "Industry support and innovation",
+     "Mining and resources",
+     "Economic: Other",
+     "Other: Nation-building and special funds"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 12053,
+     "Order": 4118,
+     "Culture": 2192,
+     "Industry support and innovation": 3205,
+     "Mining and resources": 2358,
+     "Economic": 4098,
+     "Other": 1976
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General research",
+     "Housing: Housing assistance",
+     "Culture: Public broadcasting",
+     "Mining and resources",
+     "Economic: Labour and employment services",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 12268,
+     "Housing": 5712,
+     "Culture": 1413,
+     "Mining and resources": 2358,
+     "Economic": 5437,
+     "Disaster": 512,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Order: Police and AFP",
+     "Education: Vocational and other",
+     "Housing: Housing assistance",
+     "Housing: Water and sanitation",
+     "Mining and resources",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Order": 4118,
+     "Education": 7192,
+     "Housing": 8328,
+     "Mining and resources": 2358,
+     "Disaster": 512,
+     "Contingency": 3925,
+     "Other": 926
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Defence: Navy",
+     "Order: Police and AFP",
+     "Order: Corrective services and other",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Defence": 13877,
+     "Order": 6307,
+     "Culture": 4100,
+     "Disaster": 865,
+     "Contingency": 3925,
+     "Other": 926
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General services",
+     "Order: Police and AFP",
+     "Housing: Water and sanitation",
+     "Energy: Transition and grids",
+     "Mining and resources",
+     "Economic: Tourism and trade",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 10958,
+     "Order": 4118,
+     "Housing": 2616,
+     "Energy": 2900,
+     "Mining and resources": 2358,
+     "Economic": 4238,
+     "Disaster": 512,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "GPS: Public debt transactions (non-interest)",
+     "Health: Private health insurance rebate",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Forestry and fishing",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Labour and employment services"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 5993,
+     "Health": 7128,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Transport": 3794,
+     "Economic": 5437
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Order: Police and AFP",
+     "Order: Corrective services and other",
+     "Health: Private health insurance rebate",
+     "Energy: Renewable energy programs",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Industry support and innovation",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "Order": 6307,
+     "Health": 7128,
+     "Energy": 7934,
+     "Agriculture": 3126,
+     "Industry support and innovation": 3205,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Courts and legal services",
+     "Health: Private health insurance rebate",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Economic: Labour and employment services",
+     "Disaster: Recovery payments",
+     "Other: Residual A"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 5993,
+     "Order": 3402,
+     "Health": 7128,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Economic": 5437,
+     "Disaster": 512,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Courts and legal services",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Culture: Sport and recreation",
+     "Energy: Renewable energy programs",
+     "Transport: Rail and public transport",
+     "Disaster: Recovery payments",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 7303,
+     "Order": 3402,
+     "Housing": 2616,
+     "Culture": 3605,
+     "Energy": 5034,
+     "Transport": 4626,
+     "Disaster": 512,
+     "Other": 2902
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: Foreign economic aid",
+     "Order: Police and AFP",
+     "Housing: Water and sanitation",
+     "Industry support and innovation",
+     "Transport: Roads"
+    ],
+    "n_items": 6,
+    "by_function_aud_m": {
+     "GPS": 13143,
+     "Order": 4118,
+     "Housing": 2616,
+     "Industry support and innovation": 3205,
+     "Transport": 6918
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Defence: Navy",
+     "Culture: Arts and heritage",
+     "Energy: Renewable energy programs",
+     "Economic: Other",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 6,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Defence": 13877,
+     "Culture": 2687,
+     "Energy": 5034,
+     "Economic": 4098,
+     "Disaster": 353
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Order: Police and AFP",
+     "Order: Corrective services and other",
+     "Housing: Housing assistance",
+     "Housing: Community development",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Forestry and fishing",
+     "Other: Residual B"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "Order": 6307,
+     "Housing": 8838,
+     "Energy": 12307,
+     "Forestry and fishing": 1622,
+     "Other": 926
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "Education: Vocational and other",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Forestry and fishing",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Education": 7192,
+     "Culture": 2687,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Transport": 8420,
+     "Contingency": 1625,
+     "Other": 2428
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Order: Courts and legal services",
+     "Order: Police and AFP",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Energy: Renewable energy programs",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Economic: Labour and employment services",
+     "Disaster: Recovery payments"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Order": 7520,
+     "Housing": 2616,
+     "Culture": 1413,
+     "Energy": 5034,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Economic": 5437,
+     "Disaster": 512
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General services",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Energy: Renewable energy programs",
+     "Forestry and fishing",
+     "Transport: Aviation, maritime, communications",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 10958,
+     "Culture": 6292,
+     "Energy": 5034,
+     "Forestry and fishing": 1622,
+     "Transport": 3794,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Courts and legal services",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Industry support and innovation",
+     "Economic: Labour and employment services",
+     "Economic: Other",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 5993,
+     "Order": 3402,
+     "Culture": 4100,
+     "Energy": 2900,
+     "Industry support and innovation": 3205,
+     "Economic": 9535,
+     "Disaster": 865
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Health: Private health insurance rebate",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Other",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Health": 7128,
+     "Culture": 4100,
+     "Transport": 8420,
+     "Economic": 4098,
+     "Other": 2902
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Order: Corrective services and other",
+     "Health: Private health insurance rebate",
+     "Housing: Housing assistance",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Forestry and fishing",
+     "Mining and resources",
+     "Economic: Tourism and trade",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Order": 2189,
+     "Health": 7128,
+     "Housing": 5712,
+     "Culture": 4100,
+     "Forestry and fishing": 1622,
+     "Mining and resources": 2358,
+     "Economic": 4238,
+     "Disaster": 353,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": false
+   }
+  ]
+ },
+ "A$50b": {
+  "target": 50000,
+  "exact_packages_in_space_DP": 3064432,
+  "distinct_found_by_decoder": 37,
+  "attempts": 60,
+  "decoder_hits": 37,
+  "seconds": 0.6,
+  "packages": [
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "Defence: R&D, intelligence and other",
+     "Order: Corrective services and other",
+     "Education: Vocational and other",
+     "Housing: Housing assistance",
+     "Culture: Public broadcasting",
+     "Energy: Fuel tax credits and petroleum",
+     "Forestry and fishing",
+     "Mining and resources",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 9412,
+     "Defence": 9351,
+     "Order": 2189,
+     "Education": 7192,
+     "Housing": 5712,
+     "Culture": 1413,
+     "Energy": 7273,
+     "Forestry and fishing": 1622,
+     "Mining and resources": 2358,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Order: Courts and legal services",
+     "Education: Vocational and other",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Agriculture",
+     "Forestry and fishing",
+     "Economic: Tourism and trade",
+     "Economic: Labour and employment services",
+     "Intergov: Local government assistance",
+     "Disaster: Mitigation",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual B"
+    ],
+    "n_items": 12,
+    "by_function_aud_m": {
+     "Order": 3402,
+     "Education": 7192,
+     "Energy": 12307,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Economic": 9675,
+     "Intergov": 9772,
+     "Disaster": 353,
+     "Contingency": 1625,
+     "Other": 926
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Health: Public health and other",
+     "Housing: Housing assistance",
+     "Housing: Water and sanitation",
+     "Forestry and fishing",
+     "Economic: Labour and employment services",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy",
+     "Other: Nation-building and special funds"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "Health": 29825,
+     "Housing": 8328,
+     "Forestry and fishing": 1622,
+     "Economic": 5437,
+     "Disaster": 512,
+     "Contingency": 2300,
+     "Other": 1976
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Defence: Army",
+     "Order: Corrective services and other",
+     "Health: Private health insurance rebate",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Energy: Renewable energy programs",
+     "Transport: Roads",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual A"
+    ],
+    "n_items": 13,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Defence": 14208,
+     "Order": 2189,
+     "Health": 7128,
+     "Culture": 4879,
+     "Energy": 5034,
+     "Transport": 6918,
+     "Disaster": 865,
+     "Contingency": 3925,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General services",
+     "Health: Private health insurance rebate",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Economic: Other",
+     "Intergov: Other general revenue assistance",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 8,
+    "by_function_aud_m": {
+     "GPS": 10958,
+     "Health": 7128,
+     "Culture": 2687,
+     "Energy": 2900,
+     "Economic": 4098,
+     "Intergov": 21876,
+     "Disaster": 353
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Defence: R&D, intelligence and other",
+     "Health: Private health insurance rebate",
+     "Housing: Community development",
+     "Culture: Public broadcasting",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Mining and resources",
+     "Transport: Roads",
+     "Transport: Rail and public transport",
+     "Economic: Labour and employment services",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 13,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Defence": 9351,
+     "Health": 7128,
+     "Housing": 3126,
+     "Culture": 1413,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Mining and resources": 2358,
+     "Transport": 11544,
+     "Economic": 5437,
+     "Disaster": 865
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Foreign economic aid",
+     "Defence: Army",
+     "Defence: Air Force",
+     "Order: Courts and legal services",
+     "Culture: Public broadcasting",
+     "Energy: Renewable energy programs",
+     "Energy: Transition and grids",
+     "Forestry and fishing",
+     "Other: Nation-building and special funds"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "GPS": 4826,
+     "Defence": 28827,
+     "Order": 3402,
+     "Culture": 1413,
+     "Energy": 7934,
+     "Forestry and fishing": 1622,
+     "Other": 1976
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: Financial and fiscal affairs",
+     "GPS: General services",
+     "Order: Corrective services and other",
+     "Education: Vocational and other",
+     "Housing: Housing assistance",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Other",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 12,
+    "by_function_aud_m": {
+     "GPS": 20370,
+     "Order": 2189,
+     "Education": 7192,
+     "Housing": 5712,
+     "Culture": 6292,
+     "Transport": 3794,
+     "Economic": 4098,
+     "Disaster": 353
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Order: Courts and legal services",
+     "Housing: Community development",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Energy: Renewable energy programs",
+     "Industry support and innovation",
+     "Intergov: Other general revenue assistance",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Order": 3402,
+     "Housing": 3126,
+     "Culture": 4879,
+     "Energy": 5034,
+     "Industry support and innovation": 3205,
+     "Intergov": 21876,
+     "Contingency": 1625,
+     "Other": 2902
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "Housing: Housing assistance",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Agriculture",
+     "Forestry and fishing",
+     "Intergov: Local government assistance",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 12,
+    "by_function_aud_m": {
+     "GPS": 8317,
+     "Housing": 8328,
+     "Culture": 4100,
+     "Energy": 12307,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Intergov": 9772,
+     "Other": 2428
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "Defence: R&D, intelligence and other",
+     "Education: Vocational and other",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Energy: Fuel tax credits and petroleum",
+     "Mining and resources",
+     "Transport: Roads",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Other",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "Defence": 9351,
+     "Education": 7192,
+     "Housing": 2616,
+     "Culture": 4100,
+     "Energy": 7273,
+     "Mining and resources": 2358,
+     "Transport": 10712,
+     "Economic": 4098,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Courts and legal services",
+     "Education: Vocational and other",
+     "Health: Pharmaceutical benefits",
+     "Housing: Community development",
+     "Culture: Public broadcasting",
+     "Industry support and innovation",
+     "Transport: Roads",
+     "Disaster: Recovery payments",
+     "Other: Nation-building and special funds"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Order": 3402,
+     "Education": 7192,
+     "Health": 18904,
+     "Housing": 3126,
+     "Culture": 1413,
+     "Industry support and innovation": 3205,
+     "Transport": 6918,
+     "Disaster": 512,
+     "Other": 1976
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Corrective services and other",
+     "Health: Pharmaceutical benefits",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Energy: Renewable energy programs",
+     "Industry support and innovation",
+     "Economic: Tourism and trade",
+     "Economic: Other",
+     "Disaster: Mitigation",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 13,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Order": 2189,
+     "Health": 18904,
+     "Culture": 4100,
+     "Energy": 5034,
+     "Industry support and innovation": 3205,
+     "Economic": 8336,
+     "Disaster": 353,
+     "Contingency": 1625,
+     "Other": 2902
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Order: Corrective services and other",
+     "Health: Public health and other",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Mining and resources",
+     "Transport: Roads",
+     "Disaster: Mitigation",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "Order": 2189,
+     "Health": 29825,
+     "Culture": 4879,
+     "Mining and resources": 2358,
+     "Transport": 6918,
+     "Disaster": 353,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: Foreign economic aid",
+     "GPS: General services",
+     "Housing: Water and sanitation",
+     "Culture: Sport and recreation",
+     "Energy: Transition and grids",
+     "Energy: Fuel tax credits and petroleum",
+     "Mining and resources",
+     "Transport: Roads",
+     "Transport: Rail and public transport",
+     "Economic: Tourism and trade"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 16879,
+     "Housing": 2616,
+     "Culture": 2192,
+     "Energy": 10173,
+     "Mining and resources": 2358,
+     "Transport": 11544,
+     "Economic": 4238
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: General research",
+     "Health: Private health insurance rebate",
+     "Housing: Housing assistance",
+     "Culture: Arts and heritage",
+     "Energy: Renewable energy programs",
+     "Industry support and innovation",
+     "Transport: Roads",
+     "Economic: Other",
+     "Disaster: Mitigation",
+     "Other: Residual A"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 13363,
+     "Health": 7128,
+     "Housing": 5712,
+     "Culture": 2687,
+     "Energy": 5034,
+     "Industry support and innovation": 3205,
+     "Transport": 6918,
+     "Economic": 4098,
+     "Disaster": 353,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: Financial and fiscal affairs",
+     "GPS: General research",
+     "Order: Courts and legal services",
+     "Housing: Water and sanitation",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Forestry and fishing",
+     "Intergov: Local government assistance",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Nation-building and special funds",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 13,
+    "by_function_aud_m": {
+     "GPS": 21680,
+     "Order": 3402,
+     "Housing": 2616,
+     "Culture": 4879,
+     "Forestry and fishing": 1622,
+     "Intergov": 9772,
+     "Contingency": 1625,
+     "Other": 4404
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "GPS: General services",
+     "Defence: R&D, intelligence and other",
+     "Order: Police and AFP",
+     "Order: Corrective services and other",
+     "Education: Vocational and other",
+     "Culture: Sport and recreation",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Intergov: Local government assistance",
+     "Disaster: Recovery payments",
+     "Disaster: Mitigation",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 6592,
+     "Defence": 9351,
+     "Order": 6307,
+     "Education": 7192,
+     "Culture": 2192,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Intergov": 9772,
+     "Disaster": 865,
+     "Other": 2902
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Foreign economic aid",
+     "GPS: General research",
+     "Education: Vocational and other",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Forestry and fishing",
+     "Intergov: Other general revenue assistance",
+     "Contingency: Decisions taken, not yet announced"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 8777,
+     "Education": 7192,
+     "Housing": 2616,
+     "Culture": 6292,
+     "Forestry and fishing": 1622,
+     "Intergov": 21876,
+     "Contingency": 1625
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: Foreign economic aid",
+     "GPS: General services",
+     "GPS: Public debt transactions (non-interest)",
+     "Defence: Army",
+     "Education: Vocational and other",
+     "Housing: Water and sanitation",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Other: Residual B"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 20231,
+     "Defence": 14208,
+     "Education": 7192,
+     "Housing": 2616,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Other": 926
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General research",
+     "Order: Courts and legal services",
+     "Education: Vocational and other",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Forestry and fishing",
+     "Transport: Roads",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Other",
+     "Disaster: Recovery payments",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 12268,
+     "Order": 3402,
+     "Education": 7192,
+     "Housing": 2616,
+     "Culture": 4100,
+     "Forestry and fishing": 1622,
+     "Transport": 10712,
+     "Economic": 4098,
+     "Disaster": 512,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Defence: Army",
+     "Health: Private health insurance rebate",
+     "Transport: Aviation, maritime, communications",
+     "Intergov: Other general revenue assistance",
+     "Disaster: Mitigation"
+    ],
+    "n_items": 6,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Defence": 14208,
+     "Health": 7128,
+     "Transport": 3794,
+     "Intergov": 21876,
+     "Disaster": 353
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Health: Hospital funding",
+     "Industry support and innovation",
+     "Mining and resources",
+     "Transport: Rail and public transport",
+     "Disaster: Recovery payments",
+     "Other: Residual A"
+    ],
+    "n_items": 7,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Health": 33846,
+     "Industry support and innovation": 3205,
+     "Mining and resources": 2358,
+     "Transport": 4626,
+     "Disaster": 512,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Foreign economic aid",
+     "GPS: General research",
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Corrective services and other",
+     "Housing: Water and sanitation",
+     "Culture: Sport and recreation",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Industry support and innovation",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Labour and employment services",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 15,
+    "by_function_aud_m": {
+     "GPS": 12129,
+     "Order": 2189,
+     "Housing": 2616,
+     "Culture": 2192,
+     "Energy": 12307,
+     "Industry support and innovation": 3205,
+     "Transport": 3794,
+     "Economic": 5437,
+     "Disaster": 353,
+     "Contingency": 2300,
+     "Other": 3478
+    },
+    "spares_health_defence_education": true
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "Order: Courts and legal services",
+     "Order: Corrective services and other",
+     "Education: Schools",
+     "Culture: Arts and heritage",
+     "Energy: Transition and grids",
+     "Agriculture",
+     "Forestry and fishing",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 3951,
+     "Order": 5591,
+     "Education": 27311,
+     "Culture": 2687,
+     "Energy": 2900,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Disaster": 512,
+     "Contingency": 2300
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Legislative and executive affairs",
+     "GPS: General services",
+     "Defence: Navy",
+     "Culture: Public broadcasting",
+     "Energy: Renewable energy programs",
+     "Energy: Fuel tax credits and petroleum",
+     "Economic: Tourism and trade",
+     "Economic: Other",
+     "Disaster: Recovery payments",
+     "Other: Residual A"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "GPS": 12053,
+     "Defence": 13877,
+     "Culture": 1413,
+     "Energy": 12307,
+     "Economic": 8336,
+     "Disaster": 512,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General research",
+     "GPS: General services",
+     "Defence: R&D, intelligence and other",
+     "Order: Corrective services and other",
+     "Housing: Community development",
+     "Culture: Public broadcasting",
+     "Culture: Arts and heritage",
+     "Energy: Fuel tax credits and petroleum",
+     "Transport: Roads",
+     "Economic: Other",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 6592,
+     "Defence": 9351,
+     "Order": 2189,
+     "Housing": 3126,
+     "Culture": 4100,
+     "Energy": 7273,
+     "Transport": 6918,
+     "Economic": 4098,
+     "Contingency": 3925,
+     "Other": 2428
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Defence: R&D, intelligence and other",
+     "Order: Courts and legal services",
+     "Order: Police and AFP",
+     "Education: Higher education",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Nation-building and special funds"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Defence": 9351,
+     "Order": 7520,
+     "Education": 22846,
+     "Housing": 2616,
+     "Culture": 1413,
+     "Disaster": 353,
+     "Contingency": 3925,
+     "Other": 1976
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Public debt transactions (non-interest)",
+     "Defence: Air Force",
+     "Order: Police and AFP",
+     "Order: Corrective services and other",
+     "Health: Private health insurance rebate",
+     "Culture: Public broadcasting",
+     "Energy: Renewable energy programs",
+     "Energy: Transition and grids",
+     "Forestry and fishing",
+     "Transport: Aviation, maritime, communications",
+     "Disaster: Mitigation",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 13,
+    "by_function_aud_m": {
+     "GPS": 3352,
+     "Defence": 14619,
+     "Order": 6307,
+     "Health": 7128,
+     "Culture": 1413,
+     "Energy": 7934,
+     "Forestry and fishing": 1622,
+     "Transport": 3794,
+     "Disaster": 353,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Foreign economic aid",
+     "GPS: General services",
+     "Defence: R&D, intelligence and other",
+     "Order: Police and AFP",
+     "Housing: Housing assistance",
+     "Housing: Water and sanitation",
+     "Culture: Sport and recreation",
+     "Forestry and fishing",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Other",
+     "Other: Nation-building and special funds",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 7467,
+     "Defence": 9351,
+     "Order": 4118,
+     "Housing": 8328,
+     "Culture": 2192,
+     "Forestry and fishing": 1622,
+     "Transport": 8420,
+     "Economic": 4098,
+     "Other": 4404
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Defence: Navy",
+     "Health: Pharmaceutical benefits",
+     "Housing: Water and sanitation",
+     "Culture: Public broadcasting",
+     "Forestry and fishing",
+     "Economic: Labour and employment services",
+     "Disaster: Mitigation",
+     "Contingency: Economic and policy",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Defence": 13877,
+     "Health": 18904,
+     "Housing": 2616,
+     "Culture": 1413,
+     "Forestry and fishing": 1622,
+     "Economic": 5437,
+     "Disaster": 353,
+     "Contingency": 2300,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Defence: Air Force",
+     "Education: Vocational and other",
+     "Housing: Housing assistance",
+     "Housing: Water and sanitation",
+     "Culture: Arts and heritage",
+     "Agriculture",
+     "Industry support and innovation",
+     "Transport: Roads",
+     "Contingency: Economic and policy",
+     "Contingency: Decisions taken, not yet announced"
+    ],
+    "n_items": 10,
+    "by_function_aud_m": {
+     "Defence": 14619,
+     "Education": 7192,
+     "Housing": 8328,
+     "Culture": 2687,
+     "Agriculture": 3126,
+     "Industry support and innovation": 3205,
+     "Transport": 6918,
+     "Contingency": 3925
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: General services",
+     "Defence: R&D, intelligence and other",
+     "Order: Corrective services and other",
+     "Education: Vocational and other",
+     "Health: Private health insurance rebate",
+     "Housing: Housing assistance",
+     "Housing: Community development",
+     "Housing: Water and sanitation",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Contingency: Decisions taken, not yet announced"
+    ],
+    "n_items": 11,
+    "by_function_aud_m": {
+     "GPS": 2641,
+     "Defence": 9351,
+     "Order": 2189,
+     "Education": 7192,
+     "Health": 7128,
+     "Housing": 11454,
+     "Transport": 8420,
+     "Contingency": 1625
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: Public debt transactions (non-interest)",
+     "Health: Private health insurance rebate",
+     "Housing: Water and sanitation",
+     "Culture: Arts and heritage",
+     "Culture: Sport and recreation",
+     "Agriculture",
+     "Forestry and fishing",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Economic: Labour and employment services",
+     "Contingency: Decisions taken, not yet announced",
+     "Other: Nation-building and special funds",
+     "Other: Residual A"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 11669,
+     "Health": 7128,
+     "Housing": 2616,
+     "Culture": 4879,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Transport": 8420,
+     "Economic": 5437,
+     "Contingency": 1625,
+     "Other": 3478
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "Defence: Army",
+     "Housing: Housing assistance",
+     "Housing: Community development",
+     "Culture: Arts and heritage",
+     "Energy: Fuel tax credits and petroleum",
+     "Forestry and fishing",
+     "Economic: Other",
+     "Intergov: Local government assistance",
+     "Other: Residual A"
+    ],
+    "n_items": 9,
+    "by_function_aud_m": {
+     "Defence": 14208,
+     "Housing": 8838,
+     "Culture": 2687,
+     "Energy": 7273,
+     "Forestry and fishing": 1622,
+     "Economic": 4098,
+     "Intergov": 9772,
+     "Other": 1502
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Financial and fiscal affairs",
+     "GPS: General research",
+     "GPS: Public debt transactions (non-interest)",
+     "Order: Corrective services and other",
+     "Education: Vocational and other",
+     "Agriculture",
+     "Forestry and fishing",
+     "Industry support and innovation",
+     "Mining and resources",
+     "Intergov: Local government assistance",
+     "Disaster: Recovery payments",
+     "Other: Nation-building and special funds",
+     "Other: Residual A",
+     "Other: Residual B"
+    ],
+    "n_items": 14,
+    "by_function_aud_m": {
+     "GPS": 15620,
+     "Order": 2189,
+     "Education": 7192,
+     "Agriculture": 3126,
+     "Forestry and fishing": 1622,
+     "Industry support and innovation": 3205,
+     "Mining and resources": 2358,
+     "Intergov": 9772,
+     "Disaster": 512,
+     "Other": 4404
+    },
+    "spares_health_defence_education": false
+   },
+   {
+    "items": [
+     "GPS: Foreign economic aid",
+     "GPS: General research",
+     "Housing: Community development",
+     "Energy: Fuel tax credits and petroleum",
+     "Transport: Roads",
+     "Transport: Rail and public transport",
+     "Transport: Aviation, maritime, communications",
+     "Intergov: Local government assistance",
+     "Disaster: Recovery payments",
+     "Contingency: Economic and policy",
+     "Other: Nation-building and special funds",
+     "Other: Residual B"
+    ],
+    "n_items": 12,
+    "by_function_aud_m": {
+     "GPS": 8777,
+     "Housing": 3126,
+     "Energy": 7273,
+     "Transport": 15338,
+     "Intergov": 9772,
+     "Disaster": 512,
+     "Contingency": 2300,
+     "Other": 2902
+    },
+    "spares_health_defence_education": true
+   }
+  ]
+ }
+}
