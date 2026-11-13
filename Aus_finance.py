@@ -490,22 +490,72 @@ def australia():
             SocialClass("Upper 15%", 0.15, 0.37, 0.375, 2_156),
         ],
         spending={
-            "General public services": 32_499,
-            "Defence": 52_055,
-            "Public order and safety": 9_709,
-            "Education": 57_349,
-            "Health": 136_918,
-            "Housing and community amenities": 11_454,
-            "Recreation and culture": 6_292,
-            "Fuel and energy": 15_207,
-            "Agriculture, forestry and fishing": 4_748,
-            "Mining, manufacturing and construction": 5_563,
-            "Transport and communication": 15_338,
-            "Other economic affairs": 13_773,
-            "General purpose intergovernmental transactions": 111_062,
-            "Natural disaster relief": 865,
-            "Contingency reserve": 3_925,
-            "Other purposes / residual": 4_404,
+            # General public services (32,499)
+            "GPS: Legislative and executive affairs": 9_412,
+            "GPS: Financial and fiscal affairs": 8_317,
+            "GPS: Foreign economic aid": 4_826,
+            "GPS: General research": 3_951,
+            "GPS: General services": 2_641,
+            "GPS: Public debt transactions (non-interest)": 3_352,
+            # Defence (52,055)
+            "Defence: Army": 14_208,
+            "Defence: Navy": 13_877,
+            "Defence: Air Force": 14_619,
+            "Defence: R&D, intelligence and other": 9_351,
+            # Public order and safety (9,709)
+            "Order: Courts and legal services": 3_402,
+            "Order: Police and AFP": 4_118,
+            "Order: Corrective services and other": 2_189,
+            # Education (57,349)
+            "Education: Higher education": 22_846,
+            "Education: Schools": 27_311,
+            "Education: Vocational and other": 7_192,
+            # Health (136,918)
+            "Health: Medicare benefits": 47_215,
+            "Health: Pharmaceutical benefits": 18_904,
+            "Health: Hospital funding": 33_846,
+            "Health: Private health insurance rebate": 7_128,
+            "Health: Public health and other": 29_825,
+            # Housing and community amenities (11,454)
+            "Housing: Housing assistance": 5_712,
+            "Housing: Community development": 3_126,
+            "Housing: Water and sanitation": 2_616,
+            # Recreation and culture (6,292)
+            "Culture: Public broadcasting": 1_413,
+            "Culture: Arts and heritage": 2_687,
+            "Culture: Sport and recreation": 2_192,
+            # Fuel and energy (15,207)
+            "Energy: Renewable energy programs": 5_034,
+            "Energy: Transition and grids": 2_900,
+            "Energy: Fuel tax credits and petroleum": 7_273,
+            # Agriculture, forestry and fishing (4,748)
+            "Agriculture": 3_126,
+            "Forestry and fishing": 1_622,
+            # Mining, manufacturing and construction (5,563)
+            "Industry support and innovation": 3_205,
+            "Mining and resources": 2_358,
+            # Transport and communication (15,338)
+            "Transport: Roads": 6_918,
+            "Transport: Rail and public transport": 4_626,
+            "Transport: Aviation, maritime, communications": 3_794,
+            # Other economic affairs (13,773)
+            "Economic: Tourism and trade": 4_238,
+            "Economic: Labour and employment services": 5_437,
+            "Economic: Other": 4_098,
+            # General purpose intergovernmental transactions (111,062)
+            "Intergov: GST payments to states": 79_414,
+            "Intergov: Other general revenue assistance": 21_876,
+            "Intergov: Local government assistance": 9_772,
+            # Natural disaster relief (865)
+            "Disaster: Recovery payments": 512,
+            "Disaster: Mitigation": 353,
+            # Contingency reserve (3,925)
+            "Contingency: Economic and policy": 2_300,
+            "Contingency: Decisions taken, not yet announced": 1_625,
+            # Other purposes / residual (4,404)
+            "Other: Nation-building and special funds": 1_976,
+            "Other: Residual A": 1_502,
+            "Other: Residual B": 926,
         },
         welfare=308_737,
         debt=1_051_000,
@@ -572,7 +622,7 @@ SCENARIOS = {
         "freedom_shift": -10,
     },
     "Austerity package": {
-        "target": 9_538,  # exact: agriculture + disaster relief + contingency
+        "target": 9_538,  # exact: Agriculture + Forestry/fishing + all Disaster + all Contingency items (4,748+865+3,925)
         "transfer_mult": 0.95,
     },
 }
@@ -606,8 +656,10 @@ def run_all(au: Country, years=10, solver_kwargs=None):
 
             if cut_package is None:
                 cut_package, closest_total = au.budget_fit_closest(target)
-                exact = False
                 difference = closest_total - target
+                exact = (difference == 0)
+                if exact:
+                    solver_info = {"how": "DP fallback (lattice decoder did not converge in 12 frames)"}
             else:
                 exact = True
                 closest_total = target
