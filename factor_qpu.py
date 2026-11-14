@@ -26,15 +26,12 @@ from qiskit_aer import AerSimulator
 # CONFIGURATION
 # ============================================================
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
 
-BYTE_LENGTH = 16  # 16 bytes = 128 bits
+BYTE_LENGTH = 625  # 625 bytes = 5000 bits
 
-ROWS = 8          # 8 rows
-COLS = 16         # 16 cols (8 * 16 = 128 bits, matching byte length)
-CELL_SIZE = 256
+ROWS = 50          # 50 rows
+COLS = 100         # 100 cols (50 * 100 = 5000 cells matching bit count)
+CELL_SIZE = 32     # Reduced cell size slightly to keep frame dimensions manageable
 
 REVEAL_RATE = 0.45
 BIT_ERROR_RATE = 0.02
@@ -43,11 +40,11 @@ PIXEL_NOISE = 12.0
 THRESHOLD = 127.5
 CONFIDENCE_THRESHOLD = 25.0
 
-MAX_EXPOSURES = 200
-UNCERTAIN_BITS = 32
+MAX_EXPOSURES = 300
+UNCERTAIN_BITS = 64
 MAX_FLIPS = 4
-MAX_HASH_TESTS = 200_000
-ORACLE_TIMEOUT = 120
+MAX_HASH_TESTS = 500_000
+ORACLE_TIMEOUT = 180
 
 
 # ============================================================
