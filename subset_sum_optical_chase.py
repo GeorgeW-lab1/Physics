@@ -108,6 +108,7 @@ class CommitVerifiedChaseDecoder:
         self.zeros = np.zeros(self.m, dtype=np.int32)
         self.seen = np.zeros(self.m, dtype=bool)
         self.total_hashes_tested = 0
+        self.last_status = "Collecting (waiting for cover time)"
 
     def _verify(self, candidate_b: np.ndarray) -> bool:
         if self.total_hashes_tested >= self.q_max:
@@ -130,6 +131,7 @@ class CommitVerifiedChaseDecoder:
 
         # Wait until coupon-collector cover time is reached (every cell observed >= 1)
         if not np.all(self.seen):
+            self.last_status = "Collecting (waiting for cover time)"
             return None
 
         # Majority vote baseline estimate (ties decode to 0)
@@ -137,6 +139,7 @@ class CommitVerifiedChaseDecoder:
 
         # Test zero-flip baseline candidate first
         if self._verify(b_hat):
+            self.last_status = "SUCCESS (0-flip baseline verified!)"
             return b_hat
 
         # Rank bit positions by confidence margin |D_i| = |ones_i - zeros_i| (ascending)
@@ -149,12 +152,15 @@ class CommitVerifiedChaseDecoder:
         for k in range(1, self.t + 1):
             for flip_subset in itertools.combinations(uncertain_indices, k):
                 if self.total_hashes_tested >= self.q_max:
+                    self.last_status = "Hash budget exhausted"
                     return None
                 candidate = b_hat.copy()
                 candidate[list(flip_subset)] ^= 1
                 if self._verify(candidate):
+                    self.last_status = f"SUCCESS (Chase list decode, k={k} flips)"
                     return candidate
 
+        self.last_status = f"List decode searched (hashes so far: {self.total_hashes_tested:,})"
         return None
 
 
@@ -173,10 +179,20 @@ def run_subset_sum_bench(rows: int = 8, cols: int = 7, max_cycles: int = 800, se
     channel = OpticalHeuristicChannel(rows=rows, cols=cols, reveal_rate=0.45, bit_flip_eps=0.02, seed=seed + 1)
     decoder = CommitVerifiedChaseDecoder(pub_weights, target_sum, salt, commitment, L=16, t=4, q_max=200_000)
 
-    print(f"=== NP-Hard Subset Sum Commit-Only Recovery Bench (m = {m} bits) ===")
+    print(f"=== DATA INSTANTIATION FOR NP-HARD SUBSET SUM (m = {m} bits) ===")
     print(f"Brute-Force Search Space : 2^{m} = {2**m:,} combinations")
-    print(f"Target Subset Sum        : {target_sum:,}")
-    print(f"Published Commitment     : {commitment[:32]}...\n")
+    print(f"Target Subset Sum (S)    : {target_sum:,}")
+    print(f"128-Bit Salt (Hex)       : {salt.hex()}")
+    print(f"Published Commitment (c) : {commitment}\n")
+
+    print("Sample Weights & Ground-Truth Subset Vector (First 10 of 56):")
+    for i in range(10):
+        print(f"  w[{i:2d}] = {pub_weights[i]:18,d}  |  b[{i:2d}] = {oracle._secret_b[i]}")
+    print("  ...\n")
+
+    print("=== PER-CYCLE OBSERVATION & CONVERGENCE LOG ===")
+    print(f"{'Cycle':<6} | {'Valid Cells':<12} | {'Unseen Cells':<13} | {'Action / Status'}")
+    print("-" * 72)
 
     start_time = time.perf_counter()
     cover_cycle = None
@@ -185,26 +201,41 @@ def run_subset_sum_bench(rows: int = 8, cols: int = 7, max_cycles: int = 800, se
         obs = channel.observe(oracle._secret_b)
         recovered = decoder.update_and_decode(obs)
 
-        if cover_cycle is None and np.all(decoder.seen):
+        valid_count = int(np.sum(decoder.seen))
+        unseen_count = m - valid_count
+
+        if cover_cycle is None and valid_count == m:
             cover_cycle = cycle
-            print(f"[Cycle {cycle:02d}] Coupon-collector cover time reached (all {m} bits observed).")
+
+        print(f"{cycle:<6} | {valid_count:<12} | {unseen_count:<13} | {decoder.last_status}")
 
         if recovered is not None:
             elapsed = (time.perf_counter() - start_time) * 1000
             verified, truth = oracle.reveal_if_proven(recovered)
-            chosen_weights = pub_weights[recovered == 1]
+            chosen_indices = np.where(recovered == 1)[0]
+            chosen_weights = pub_weights[chosen_indices]
 
-            print(f"[Cycle {cycle:02d}] SOLUTION RECOVERED & CRYPTOGRAPHICALLY VERIFIED!")
-            print(f"  - Elapsed Time          : {elapsed:.2f} ms")
-            print(f"  - Cover Time Cycle      : {cover_cycle} (Theoretical mean ~ 7.7)")
+            print("\n=== FINAL EXECUTION & VERIFICATION SUMMARY ===")
+            print(f"  - Total Elapsed Time    : {elapsed:.2f} ms")
+            print(f"  - Cover Time Cycle      : Cycle {cover_cycle} (Theoretical mean ~ 7.7)")
             print(f"  - Candidates Evaluated  : {decoder.total_hashes_tested:,} (vs 2^{m-1} avg brute force)")
             print(f"  - Subset Cardinality    : {len(chosen_weights)} / {m} weights selected")
-            print(f"  - Computed Sum          : {int(np.sum(chosen_weights)):,}")
-            print(f"  - Exact Target Match    : {int(np.sum(chosen_weights)) == target_sum}")
-            print(f"  - Commitment Verified   : {verified}")
+            print(f"  - Selected Indices      : {chosen_indices.tolist()}")
+            print(f"  - Commitment Verified   : {verified}\n")
+
+            print("=== RECOVERED SUBSET DETAILS (All 56 Weight & Index Mappings) ===")
+            print(f"{'Index':<6} | {'Weight Value':<20} | {'Included Status'}")
+            print("-" * 45)
+            for idx in range(m):
+                status_str = "SELECTED (1)" if recovered[idx] == 1 else "EXCLUDED (0)"
+                print(f"{idx:<6} | {pub_weights[idx]:<20,d} | {status_str}")
+
+            print("-" * 45)
+            print(f"Sum of Selected Weights : {int(np.sum(chosen_weights)):,}")
+            print(f"Exact Target Match      : {int(np.sum(chosen_weights)) == target_sum}")
             return
 
-    print("Failed to recover solution within cycle/hash budget.")
+    print("\nFailed to recover solution within cycle/hash budget.")
 
 
 if __name__ == "__main__":
