@@ -3,14 +3,15 @@ import hashlib
 import itertools
 import time
 import numpy as np
-
+import sys
+sys.set_int_max_str_digits(1000000)
 def run_transparent_bench():
     print("=" * 80)
     print(" 🚀 INITIALIZING NP-HARD SUBSET SUM OPTICAL-CHANNEL & CHASE DECODER PIPELINE")
     print("=" * 80)
     
     seed = 42
-    rows, cols = 80, 70
+    rows, cols = 800, 700
     m = rows * cols 
     rng = np.random.default_rng(seed)
 
