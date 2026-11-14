@@ -20,10 +20,12 @@ def generate_dataset(rows, cols, filename="tough_1000.csv", seed=42):
         df.to_csv(f, index=False)
     print(f"[+] Generated dataset '{filename}' with m = {m} variables. Target Sum S = {target_sum}")
     
-    # Print Dataset Dump Preview
-    print("\n--- DATASET DUMP PREVIEW (First 10 Rows) ---")
-    print(df.head(10).to_string(index=True))
-    print("--------------------------------------------\n")
+    # --- INPUT DATASET DUMP ---
+    print("\n==================================================")
+    print("               INPUT DATASET DUMP                 ")
+    print("==================================================")
+    print(df.head(15).to_string(index=True))
+    print(f"... [Showing first 15 of {m} rows]\n==================================================\n")
 
 def load_dataset(filename):
     """Loads weights, secret vector, and target sum from a CSV file robustly."""
@@ -41,8 +43,8 @@ def load_dataset(filename):
         target_sum = int(np.dot(weights, secret_b))
     return weights, secret_b, target_sum
 
-def run_transparent_bench_from_file(filename, max_cycles=49):
-    """Runs the optical-channel recovery pipeline using a loaded dataset from CSV."""
+def run_transparent_bench_with_dump(filename, max_cycles=49):
+    """Runs the optical-channel recovery pipeline and prints/dumps input and output results."""
     print(f"[*] Loading dataset from {filename}...")
     weights, secret_b, target_sum = load_dataset(filename)
     m = len(weights)
@@ -59,6 +61,7 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
     epsilon = 0.02
     r = 0.45
     successful_cycle = None
+    est_b = None
     
     for cycle in range(1, max_cycles + 1):
         reveal_mask = np.random.rand(m) < r
@@ -83,8 +86,33 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
                 
     if successful_cycle is None:
         print(f"[-] Reached max_cycles ({max_cycles}) without full verification convergence.")
-    return successful_cycle
+        margins = ones_counts - zeros_counts
+        est_b = (margins > 0).astype(np.uint8)
+
+    # --- POST-RECOVERY DUMP ---
+    print("\n==================================================")
+    print("               POST-RECOVERY DUMP                 ")
+    print("==================================================")
+    dump_df = pd.DataFrame({
+        'weight': weights,
+        'true_b': secret_b,
+        'ones_count': ones_counts,
+        'zeros_count': zeros_counts,
+        'margin (ones - zeros)': ones_counts - zeros_counts,
+        'recovered_b': est_b
+    })
+    
+    mismatches = np.sum(secret_b != est_b)
+    print(f"Total Variables (m): {m}")
+    print(f"Successful Verification Cycle: {successful_cycle}")
+    print(f"Bit Mismatches vs True Secret: {mismatches}")
+    print("\nFirst 15 Rows of Recovery Dump:")
+    print(dump_df.head(15).to_string(index=True))
+    print("==================================================\n")
+    
+    dump_df.to_csv("recovery_dump_result.csv", index=True)
+    print("[+] Full recovery dump saved to 'recovery_dump_result.csv'.")
 
 if __name__ == "__main__":
     generate_dataset(rows=50, cols=20, filename="tough_1000.csv")
-    run_transparent_bench_from_file("tough_1000.csv")
+    run_transparent_bench_with_dump("tough_1000.csv")
