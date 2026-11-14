@@ -1,0 +1,756 @@
+==============================================================================================================
+ 🧲 ROOM-TEMPERATURE SUPERCONDUCTOR CANDIDATE SCREENER
+==============================================================================================================
+This tool generates and ranks research candidates. It does not prove superconductivity or predict a guaranteed critical temperature.
+A confirmed superconductor requires reproducible zero resistance, a Meissner effect, and appropriate structural and electronic validation.
+
+Top 30 prioritized research candidates:
+
+
+#1: Li2MoO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 24.832 Da
+  Valence electrons per atom      : 4.571
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.747
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#2: Li2TiO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 17.963 Da
+  Valence electrons per atom      : 4.286
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.727
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#3: Li2VO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 18.403 Da
+  Valence electrons per atom      : 4.429
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.719
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#4: LiMoO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 30.177 Da
+  Valence electrons per atom      : 5.000
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.747
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#5: LiTiO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 20.561 Da
+  Valence electrons per atom      : 4.600
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.727
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#6: LiVO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 50.00
+  Ambient-pressure prior          : 19.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 21.176 Da
+  Valence electrons per atom      : 4.800
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.719
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#7: Li2CuO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 44.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 20.203 Da
+  Valence electrons per atom      : 5.286
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#8: LiCuO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 44.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 23.697 Da
+  Valence electrons per atom      : 6.000
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : No
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#9: BaFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 79.773 Da
+  Valence electrons per atom      : 5.600
+  Electronegativity contrast      : 1.290
+  Atomic-radius mismatch          : 0.549
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#10: BaFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 89.366 Da
+  Valence electrons per atom      : 5.000
+  Electronegativity contrast      : 1.290
+  Atomic-radius mismatch          : 0.549
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#11: CaFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 60.322 Da
+  Valence electrons per atom      : 5.600
+  Electronegativity contrast      : 1.180
+  Atomic-radius mismatch          : 0.412
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#12: CaFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 56.948 Da
+  Valence electrons per atom      : 5.000
+  Electronegativity contrast      : 1.180
+  Atomic-radius mismatch          : 0.412
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#13: KFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 60.126 Da
+  Valence electrons per atom      : 5.400
+  Electronegativity contrast      : 1.360
+  Atomic-radius mismatch          : 0.531
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#14: KFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 56.622 Da
+  Valence electrons per atom      : 4.667
+  Electronegativity contrast      : 1.360
+  Atomic-radius mismatch          : 0.531
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#15: LaFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 80.089 Da
+  Valence electrons per atom      : 5.800
+  Electronegativity contrast      : 1.080
+  Atomic-radius mismatch          : 0.525
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#16: LaFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 89.892 Da
+  Valence electrons per atom      : 5.333
+  Electronegativity contrast      : 1.080
+  Atomic-radius mismatch          : 0.525
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#17: Li2FeO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 19.103 Da
+  Valence electrons per atom      : 4.857
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : Yes
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#18: Li2NiO4
+  Structural prototype            : A2BO4_layered_oxide
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 19.510 Da
+  Valence electrons per atom      : 5.143
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : Yes
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#19: LiFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 53.695 Da
+  Valence electrons per atom      : 5.400
+  Electronegativity contrast      : 1.200
+  Atomic-radius mismatch          : 0.317
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#20: LiFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 45.902 Da
+  Valence electrons per atom      : 4.667
+  Electronegativity contrast      : 1.200
+  Atomic-radius mismatch          : 0.317
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#21: LiFeO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 22.156 Da
+  Valence electrons per atom      : 5.400
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : Yes
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#22: LiNiO3
+  Structural prototype            : ABO3_perovskite
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 22.726 Da
+  Valence electrons per atom      : 5.800
+  Electronegativity contrast      : 2.460
+  Atomic-radius mismatch          : 0.713
+  Magnetic element                : Yes
+  Light element                   : Yes
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Copper-oxide motif: relevant to cuprate-like correlated superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#23: NaFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 56.905 Da
+  Valence electrons per atom      : 5.400
+  Electronegativity contrast      : 1.250
+  Atomic-radius mismatch          : 0.400
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#24: NaFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 51.252 Da
+  Valence electrons per atom      : 4.667
+  Electronegativity contrast      : 1.250
+  Atomic-radius mismatch          : 0.400
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#25: SrFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 69.831 Da
+  Valence electrons per atom      : 5.600
+  Electronegativity contrast      : 1.230
+  Atomic-radius mismatch          : 0.479
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#26: SrFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 72.796 Da
+  Valence electrons per atom      : 5.000
+  Electronegativity contrast      : 1.230
+  Atomic-radius mismatch          : 0.479
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#27: YFe2As2
+  Structural prototype            : AFe2As2
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 70.088 Da
+  Valence electrons per atom      : 5.800
+  Electronegativity contrast      : 0.960
+  Atomic-radius mismatch          : 0.462
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#28: YFeAs
+  Structural prototype            : AFeAs
+  Superconductivity research prior: 39.00
+  Ambient-pressure prior          : 15.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 73.224 Da
+  Valence electrons per atom      : 5.333
+  Electronegativity contrast      : 0.960
+  Atomic-radius mismatch          : 0.462
+  Magnetic element                : Yes
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Iron-pnictide/chalcogenide motif: relevant to unconventional superconductivity
+    - Magnetic element may compete with superconductivity
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#29: Ba3Mo
+  Structural prototype            : A3B
+  Superconductivity research prior: 32.00
+  Ambient-pressure prior          : 9.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 126.985 Da
+  Valence electrons per atom      : 3.000
+  Electronegativity contrast      : 1.270
+  Atomic-radius mismatch          : 0.249
+  Magnetic element                : No
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+#30: Ba3Nb
+  Structural prototype            : A3B
+  Superconductivity research prior: 32.00
+  Ambient-pressure prior          : 9.00
+  Suggested pressure for study    : 0.0 GPa
+  Average atomic mass             : 126.224 Da
+  Valence electrons per atom      : 2.750
+  Electronegativity contrast      : 0.710
+  Atomic-radius mismatch          : 0.217
+  Magnetic element                : No
+  Light element                   : No
+  Screening rationale:
+    - Valence-electron count lies in a broad, potentially favorable range
+    - Moderate electronegativity contrast may support charge transfer
+    - Atomic-size mismatch is compatible with the selected prototype
+    - Contains refractory transition metal common in conventional superconductors
+  Required follow-up workflow:
+    - Perform crystal-structure prediction and stability screening
+    - Calculate electronic band structure and density of states
+    - Calculate phonons and check dynamical stability
+    - Estimate electron-phonon coupling and superconducting gap
+    - Evaluate magnetic order, correlations, and possible competing phases
+    - Synthesize only after computational shortlisting and experimental design
+
+[Program finished]
