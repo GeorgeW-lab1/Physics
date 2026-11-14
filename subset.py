@@ -3,12 +3,12 @@ import pandas as pd
 import hashlib
 import os
 
-def generate_dataset(rows, cols, filename="subset_sum_custom.csv", seed=42):
+def generate_dataset(rows, cols, filename="tough_1000.csv", seed=42):
     """Generates and saves a tough Subset Sum dataset to CSV with target sum metadata."""
     np.random.seed(seed)
     m = rows * cols
     weights = np.random.randint(10**11, 10**12, size=m, dtype=np.int64)
-    secret_b = np.random.randint(0, 2, size=m, dtype=np.uint8)
+    secret_b = np.random.randint(0, 2, size=m, dtype=np.int8)
     if secret_b.sum() == 0:
         secret_b[0] = 1
     target_sum = int(np.dot(weights, secret_b))
@@ -19,6 +19,11 @@ def generate_dataset(rows, cols, filename="subset_sum_custom.csv", seed=42):
         f.write(f"# VARIABLES={m}\n")
         df.to_csv(f, index=False)
     print(f"[+] Generated dataset '{filename}' with m = {m} variables. Target Sum S = {target_sum}")
+    
+    # Print Dataset Dump Preview
+    print("\n--- DATASET DUMP PREVIEW (First 10 Rows) ---")
+    print(df.head(10).to_string(index=True))
+    print("--------------------------------------------\n")
 
 def load_dataset(filename):
     """Loads weights, secret vector, and target sum from a CSV file robustly."""
@@ -45,7 +50,7 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
     
     salt = os.urandom(16)
     packed_secret = np.packbits(secret_b)
-    commit = hashlib.sha256(salt + packed_secret).digest()
+    commit = hashlib.sha256(salt + packed_secret.tobytes()).digest()
     
     ones_counts = np.zeros(m, dtype=np.int32)
     zeros_counts = np.zeros(m, dtype=np.int32)
@@ -69,7 +74,7 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
             est_b = (margins > 0).astype(np.uint8)
             
             current_sum = int(np.dot(weights, est_b))
-            current_commit = hashlib.sha256(salt + np.packbits(est_b)).digest()
+            current_commit = hashlib.sha256(salt + np.packbits(est_b).tobytes()).digest()
             
             if current_sum == target_sum and current_commit == commit:
                 successful_cycle = cycle
