@@ -2,32 +2,32 @@ import numpy as np
 import pandas as pd
 import hashlib
 import os
-import argparse
 
 def generate_dataset(rows, cols, filename="subset_sum_custom.csv", seed=42):
-    """Generates and saves a tough Subset Sum dataset to CSV."""
+    """Generates and saves a tough Subset Sum dataset to CSV with target sum metadata."""
     np.random.seed(seed)
     m = rows * cols
     weights = np.random.randint(10**11, 10**12, size=m, dtype=np.int64)
-    secret_b = np.random.randint(0, 2, size=m, dtype=np.int8)
+    secret_b = np.random.randint(0, 2, size=m, dtype=np.uint8)
     if secret_b.sum() == 0:
         secret_b[0] = 1
     target_sum = int(np.dot(weights, secret_b))
     
     df = pd.DataFrame({'weight': weights, 'secret_b': secret_b})
     with open(filename, 'w') as f:
-        f.write(f"# TARGET_SUM={target_sum}\\n")
-        f.write(f"# VARIABLES={m}\\n")
+        f.write(f"# TARGET_SUM={target_sum}\n")
+        f.write(f"# VARIABLES={m}\n")
         df.to_csv(f, index=False)
     print(f"[+] Generated dataset '{filename}' with m = {m} variables. Target Sum S = {target_sum}")
 
 def load_dataset(filename):
-    """Loads weights, secret vector, and target sum from a CSV file."""
+    """Loads weights, secret vector, and target sum from a CSV file robustly."""
     target_sum = None
     with open(filename, 'r') as f:
         for line in f:
-            if line.startswith("# TARGET_SUM="):
-                target_sum = int(line.strip().split('=')[1])
+            if "TARGET_SUM=" in line:
+                part = line.strip().split('TARGET_SUM=')[1]
+                target_sum = int(''.join(filter(str.isdigit, part.split()[0])))
                 break
     df = pd.read_csv(filename, comment='#')
     weights = df['weight'].to_numpy(dtype=np.int64)
@@ -37,7 +37,7 @@ def load_dataset(filename):
     return weights, secret_b, target_sum
 
 def run_transparent_bench_from_file(filename, max_cycles=49):
-    """Runs the optical-channel recovery pipeline using a loaded dataset."""
+    """Runs the optical-channel recovery pipeline using a loaded dataset from CSV."""
     print(f"[*] Loading dataset from {filename}...")
     weights, secret_b, target_sum = load_dataset(filename)
     m = len(weights)
@@ -68,7 +68,6 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
             margins = ones_counts - zeros_counts
             est_b = (margins > 0).astype(np.uint8)
             
-            # Incremental / Full verification check
             current_sum = int(np.dot(weights, est_b))
             current_commit = hashlib.sha256(salt + np.packbits(est_b)).digest()
             
@@ -82,6 +81,5 @@ def run_transparent_bench_from_file(filename, max_cycles=49):
     return successful_cycle
 
 if __name__ == "__main__":
-    # Example: generate a custom dataset and run bench
     generate_dataset(rows=50, cols=20, filename="tough_1000.csv")
     run_transparent_bench_from_file("tough_1000.csv")
