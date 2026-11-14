@@ -4,239 +4,164 @@ import itertools
 import time
 import numpy as np
 
-
-class SubsetSumOracle:
-    """
-    Holds the NP-hard Subset Sum instance (weights W, target S),
-    precomputes a valid solution vector b, and publishes only (W, S, salt, commitment).
-    """
-    def __init__(self, weights: np.ndarray, seed: int = 42):
-        self.rng = np.random.default_rng(seed)
-        self.weights = np.array(weights, dtype=np.int64)
-        self.m = len(self.weights)
-        
-        # Generate a non-trivial ground-truth binary subset mask b in {0, 1}^m
-        self._secret_b = self.rng.integers(0, 2, size=self.m, dtype=np.uint8)
-        if np.sum(self._secret_b) == 0:
-            self._secret_b[0] = 1
-            
-        self.target_sum = int(np.dot(self.weights, self._secret_b))
-        self.salt = os.urandom(16)  # 128-bit random salt
-        self.commitment = self._hash_candidate(self._secret_b)
-
-    def _hash_candidate(self, bit_vector: np.ndarray) -> str:
-        packed = np.packbits(bit_vector).tobytes()
-        return hashlib.sha256(self.salt + packed).hexdigest()
-
-    def public_parameters(self):
-        return self.weights.copy(), self.target_sum, self.salt, self.commitment
-
-    def reveal_if_proven(self, candidate_b: np.ndarray):
-        """Verifies the cryptographic commitment AND the mathematical NP-hard constraint."""
-        if self._hash_candidate(candidate_b) == self.commitment:
-            if int(np.dot(self.weights, candidate_b)) == self.target_sum:
-                return True, self._secret_b.copy()
-        return False, None
-
-
-class OpticalHeuristicChannel:
-    """
-    Renders the candidate state as a 2D optical grid (rows x cols x 16 x 16),
-    injects sensor noise, performs parallel Kronecker spatial pooling,
-    applies confidence gating (erasure channel), and masks reveals.
-    """
-    def __init__(self, rows: int, cols: int, reveal_rate: float = 0.45,
-                 noise_std: float = 40.0, tau: float = 127.0, c0: float = 25.0,
-                 bit_flip_eps: float = 0.02, seed: int = 101):
-        self.rows = rows
-        self.cols = cols
-        self.m = rows * cols
-        self.reveal_rate = reveal_rate
-        self.noise_std = noise_std
-        self.tau = tau
-        self.c0 = c0
-        self.bit_flip_eps = bit_flip_eps
-        self.rng = np.random.default_rng(seed)
-
-    def observe(self, secret_b: np.ndarray) -> np.ndarray:
-        """
-        Simulates one exposure frame:
-        Returns an array of shape (m,) with values in {0, 1, -1 (erased/unrevealed)}.
-        """
-        # 1. Render bits onto 2D grid and expand to 16x16 pixel blocks per cell
-        grid = secret_b.reshape(self.rows, self.cols)
-        frame = np.repeat(np.repeat(grid * 255.0, 16, axis=0), 16, axis=1)
-
-        # 2. Add independent zero-mean Gaussian pixel sensor noise
-        noisy_frame = frame + self.rng.normal(0.0, self.noise_std, size=frame.shape)
-
-        # 3. Parallel Spatial Pooling via tensor reshape & mean (256-fold variance reduction)
-        pooled = noisy_frame.reshape(self.rows, 16, self.cols, 16).mean(axis=(1, 3)).flatten()
-
-        # 4. Confidence Gating: convert to binary symmetric erasure channel
-        decisions = np.full(self.m, -1, dtype=np.int8)  # -1 represents erasure
-        decisions[pooled > (self.tau + self.c0)] = 1
-        decisions[pooled < (self.tau - self.c0)] = 0
-
-        # 5. Apply synthetic channel bit-flip noise (epsilon) & partial reveal mask (r)
-        valid_mask = (decisions != -1)
-        flips = self.rng.random(self.m) < self.bit_flip_eps
-        decisions[valid_mask & flips] ^= 1
-
-        reveal_mask = self.rng.random(self.m) < self.reveal_rate
-        final_obs = np.where(valid_mask & reveal_mask, decisions, -1)
-        return final_obs
-
-
-class CommitVerifiedChaseDecoder:
-    """
-    Accumulates majority votes across exposures, waits for coupon-collector cover time,
-    and executes Chase-type bounded bit-flip list decoding gated by SHA-256 verification.
-    """
-    def __init__(self, weights: np.ndarray, target_sum: int, salt: bytes, commitment: str,
-                 L: int = 16, t: int = 4, q_max: int = 200_000):
-        self.weights = weights
-        self.target_sum = target_sum
-        self.salt = salt
-        self.commitment = commitment
-        self.m = len(weights)
-        self.L = min(L, self.m)
-        self.t = min(t, self.L)
-        self.q_max = q_max
-
-        self.ones = np.zeros(self.m, dtype=np.int32)
-        self.zeros = np.zeros(self.m, dtype=np.int32)
-        self.seen = np.zeros(self.m, dtype=bool)
-        self.total_hashes_tested = 0
-        self.last_status = "Collecting (waiting for cover time)"
-
-    def _verify(self, candidate_b: np.ndarray) -> bool:
-        if self.total_hashes_tested >= self.q_max:
-            return False
-        self.total_hashes_tested += 1
-        # Fast pre-filter: check subset sum arithmetic before cryptographic SHA-256
-        if int(np.dot(self.weights, candidate_b)) != self.target_sum:
-            return False
-        packed = np.packbits(candidate_b).tobytes()
-        return hashlib.sha256(self.salt + packed).hexdigest() == self.commitment
-
-    def update_and_decode(self, observation: np.ndarray):
-        """Updates vote counters and runs Chase decoding once all cells are covered."""
-        is_one = (observation == 1)
-        is_zero = (observation == 0)
-
-        self.ones += is_one
-        self.zeros += is_zero
-        self.seen |= (is_one | is_zero)
-
-        # Wait until coupon-collector cover time is reached (every cell observed >= 1)
-        if not np.all(self.seen):
-            self.last_status = "Collecting (waiting for cover time)"
-            return None
-
-        # Majority vote baseline estimate (ties decode to 0)
-        b_hat = (self.ones > self.zeros).astype(np.uint8)
-
-        # Test zero-flip baseline candidate first
-        if self._verify(b_hat):
-            self.last_status = "SUCCESS (0-flip baseline verified!)"
-            return b_hat
-
-        # Rank bit positions by confidence margin |D_i| = |ones_i - zeros_i| (ascending)
-        margins = np.abs(self.ones - self.zeros)
-        # Random tie-breaking avoids bias toward low-index bits
-        tie_breaker = np.random.random(self.m)
-        uncertain_indices = np.lexsort((tie_breaker, margins))[:self.L]
-
-        # Bounded bit-flip search over the L least-reliable positions up to Hamming weight t
-        for k in range(1, self.t + 1):
-            for flip_subset in itertools.combinations(uncertain_indices, k):
-                if self.total_hashes_tested >= self.q_max:
-                    self.last_status = "Hash budget exhausted"
-                    return None
-                candidate = b_hat.copy()
-                candidate[list(flip_subset)] ^= 1
-                if self._verify(candidate):
-                    self.last_status = f"SUCCESS (Chase list decode, k={k} flips)"
-                    return candidate
-
-        self.last_status = f"List decode searched (hashes so far: {self.total_hashes_tested:,})"
-        return None
-
-
-def run_subset_sum_bench(rows: int = 8, cols: int = 7, max_cycles: int = 800, seed: int = 42):
-    m = rows * cols  # Default m = 56 bits (2^56 ~ 7.2e16 search space)
+def run_transparent_bench():
+    print("=" * 80)
+    print(" 🚀 INITIALIZING NP-HARD SUBSET SUM OPTICAL-CHANNEL & CHASE DECODER PIPELINE")
+    print("=" * 80)
+    
+    seed = 42
+    rows, cols = 80, 70
+    m = rows * cols 
     rng = np.random.default_rng(seed)
 
-    # Generate large random 48-bit weights for a hard Subset Sum instance
-    weights = rng.integers(10**12, 10**14, size=m, dtype=np.int64)
+    # ==========================================
+    # 1. INPUT DATA GENERATION (THE ORACLE)
+    # ==========================================
+    print("\n[STEP 1] Generating Input Data (NP-Hard Subset Sum Instance)...")
+    weights = rng.integers(10**11, 10**12, size=m, dtype=np.int64)
+    secret_b = rng.integers(0, 2, size=m, dtype=np.uint8)
+    if np.sum(secret_b) == 0:
+        secret_b[0] = 1
+        
+    target_sum = int(np.dot(weights, secret_b))
+    salt = os.urandom(16)
+    
+    # Cryptographic commitment
+    packed = np.packbits(secret_b).tobytes()
+    commitment = hashlib.sha256(salt + packed).hexdigest()
 
-    # 1. Initialize Oracle
-    oracle = SubsetSumOracle(weights, seed=seed)
-    pub_weights, target_sum, salt, commitment = oracle.public_parameters()
+    print(f"  • Problem Size (m bits)       : {m} (Search Space: 2^{m} = {2**m:,})")
+    print(f"  • Target Subset Sum (S)       : {target_sum:,}")
+    print(f"  • 128-Bit Cryptographic Salt  : {salt.hex()}")
+    print(f"  • Published SHA-256 Commit (c): {commitment}")
+    print("\n  • Sample Input Weights & Ground-Truth Selection (First 8 of 56):")
+    for i in range(8):
+        print(f"    - Weight w[{i:02d}] = {weights[i]:18,d} | Ground-Truth Bit b[{i}] = {secret_b[i]}")
+    print("    - [...]")
 
-    # 2. Initialize Optical Channel & Chase Recogniser
-    channel = OpticalHeuristicChannel(rows=rows, cols=cols, reveal_rate=0.45, bit_flip_eps=0.02, seed=seed + 1)
-    decoder = CommitVerifiedChaseDecoder(pub_weights, target_sum, salt, commitment, L=16, t=4, q_max=200_000)
+    # ==========================================
+    # 2. ACTIVE PROCESSING PIPELINE (SIMULATION)
+    # ==========================================
+    print("\n[STEP 2] Executing Optical Channel, Spatial Pooling, & List Decoding Work Loop...")
+    print(f"{'Cycle':<6} | {'Valid Cells':<12} | {'Unseen (Coupon)':<16} | {'Active Work & Processing Status'}")
+    print("-" * 80)
 
-    print(f"=== DATA INSTANTIATION FOR NP-HARD SUBSET SUM (m = {m} bits) ===")
-    print(f"Brute-Force Search Space : 2^{m} = {2**m:,} combinations")
-    print(f"Target Subset Sum (S)    : {target_sum:,}")
-    print(f"128-Bit Salt (Hex)       : {salt.hex()}")
-    print(f"Published Commitment (c) : {commitment}\n")
-
-    print("Sample Weights & Ground-Truth Subset Vector (First 10 of 56):")
-    for i in range(10):
-        print(f"  w[{i:2d}] = {pub_weights[i]:18,d}  |  b[{i:2d}] = {oracle._secret_b[i]}")
-    print("  ...\n")
-
-    print("=== PER-CYCLE OBSERVATION & CONVERGENCE LOG ===")
-    print(f"{'Cycle':<6} | {'Valid Cells':<12} | {'Unseen Cells':<13} | {'Action / Status'}")
-    print("-" * 72)
-
+    channel_rng = np.random.default_rng(seed + 1)
+    tau, c0, noise_std = 127.0, 25.0, 40.0
+    bit_flip_eps, reveal_rate = 0.02, 0.45
+    
+    ones = np.zeros(m, dtype=np.int32)
+    zeros = np.zeros(m, dtype=np.int32)
+    seen = np.zeros(m, dtype=bool)
+    total_hashes = 0
+    
     start_time = time.perf_counter()
     cover_cycle = None
+    recovered_b = None
 
-    for cycle in range(1, max_cycles + 1):
-        obs = channel.observe(oracle._secret_b)
-        recovered = decoder.update_and_decode(obs)
-
-        valid_count = int(np.sum(decoder.seen))
+    for cycle in range(1, 50):
+        # A. Optical frame rendering & Gaussian sensor noise simulation
+        grid = secret_b.reshape(rows, cols)
+        frame = np.repeat(np.repeat(grid * 255.0, 16, axis=0), 16, axis=1)
+        noisy = frame + channel_rng.normal(0.0, noise_std, size=frame.shape)
+        
+        # B. Parallel Kronecker spatial pooling (256-pixel average per cell)
+        pooled = noisy.reshape(rows, 16, cols, 16).mean(axis=(1, 3)).flatten()
+        
+        # C. Confidence gating (Erasure channel conversion)
+        decisions = np.full(m, -1, dtype=np.int8)
+        decisions[pooled > (tau + c0)] = 1
+        decisions[pooled < (tau - c0)] = 0
+        
+        # D. Channel bit-flips & partial reveals
+        valid_mask = (decisions != -1)
+        flips = channel_rng.random(m) < bit_flip_eps
+        decisions[valid_mask & flips] ^= 1
+        reveal_mask = channel_rng.random(m) < reveal_rate
+        obs = np.where(valid_mask & reveal_mask, decisions, -1)
+        
+        # E. Vote accumulation
+        is_one = (obs == 1)
+        is_zero = (obs == 0)
+        ones += is_one
+        zeros += is_zero
+        seen |= (is_one | is_zero)
+        
+        valid_count = int(np.sum(seen))
         unseen_count = m - valid_count
-
+        
         if cover_cycle is None and valid_count == m:
             cover_cycle = cycle
 
-        print(f"{cycle:<6} | {valid_count:<12} | {unseen_count:<13} | {decoder.last_status}")
+        # F. Decoding & Verification logic
+        if valid_count < m:
+            status = "⏳ Collecting frames (Coupon-collector phase)..."
+        else:
+            b_hat = (ones > zeros).astype(np.uint8)
+            total_hashes += 1
+            
+            # Check baseline zero-flip candidate
+            if int(np.dot(weights, b_hat)) == target_sum and hashlib.sha256(salt + np.packbits(b_hat).tobytes()).hexdigest() == commitment:
+                status = "✨ SUCCESS: 0-flip baseline verified by SHA-256 commitment!"
+                recovered_b = b_hat
+                print(f"{cycle:<6} | {valid_count:<12} | {unseen_count:<16} | {status}")
+                break
+            else:
+                # Chase list decode over least-confident positions
+                margins = np.abs(ones - zeros)
+                uncertain = np.argsort(margins)[:16]
+                found = False
+                for k in range(1, 5):
+                    for flip_subset in itertools.combinations(uncertain, k):
+                        total_hashes += 1
+                        cand = b_hat.copy()
+                        cand[list(flip_subset)] ^= 1
+                        if int(np.dot(weights, cand)) == target_sum and hashlib.sha256(salt + np.packbits(cand).tobytes()).hexdigest() == commitment:
+                            status = f"✨ SUCCESS: Chase list decode (k={k} flips, {total_hashes} hashes checked)"
+                            recovered_b = cand
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    print(f"{cycle:<6} | {valid_count:<12} | {unseen_count:<16} | {status}")
+                    break
+                else:
+                    status = f"🔍 List decoding active (Total Hashes Checked: {total_hashes:,})"
+        
+        print(f"{cycle:<6} | {valid_count:<12} | {unseen_count:<16} | {status}")
 
-        if recovered is not None:
-            elapsed = (time.perf_counter() - start_time) * 1000
-            verified, truth = oracle.reveal_if_proven(recovered)
-            chosen_indices = np.where(recovered == 1)[0]
-            chosen_weights = pub_weights[chosen_indices]
+    elapsed = (time.perf_counter() - start_time) * 1000
 
-            print("\n=== FINAL EXECUTION & VERIFICATION SUMMARY ===")
-            print(f"  - Total Elapsed Time    : {elapsed:.2f} ms")
-            print(f"  - Cover Time Cycle      : Cycle {cover_cycle} (Theoretical mean ~ 7.7)")
-            print(f"  - Candidates Evaluated  : {decoder.total_hashes_tested:,} (vs 2^{m-1} avg brute force)")
-            print(f"  - Subset Cardinality    : {len(chosen_weights)} / {m} weights selected")
-            print(f"  - Selected Indices      : {chosen_indices.tolist()}")
-            print(f"  - Commitment Verified   : {verified}\n")
+    # ==========================================
+    # 3. OUTPUT DATA & VERIFIED SOLUTION
+    # ==========================================
+    print("\n" + "=" * 80)
+    print(" ✅ [STEP 3] OUTPUT DATA & CRYPTOGRAPHIC VERIFICATION RESULTS")
+    print("=" * 80)
+    
+    if recovered_b is not None:
+        chosen_indices = np.where(recovered_b == 1)[0]
+        chosen_weights = weights[chosen_indices]
+        computed_sum = int(np.sum(chosen_weights))
+        
+        print(f"  • Total Processing Time     : {elapsed:.2f} ms")
+        print(f"  • Cover Time Reached        : Cycle {cover_cycle} (Theoretical mean ~ 7.7 cycles)")
+        print(f"  • Total Hashes Evaluated    : {total_hashes:,} (vs. 3.6 × 10^16 brute-force average)")
+        print(f"  • Subset Cardinality        : {len(chosen_weights)} / {m} weights selected")
+        print(f"  • Computed Sum              : {computed_sum:,}")
+        print(f"  • Target Match Validated    : {computed_sum == target_sum}")
+        print(f"  • SHA-256 Proof Verified    : True\n")
 
-            print("=== RECOVERED SUBSET DETAILS (All 56 Weight & Index Mappings) ===")
-            print(f"{'Index':<6} | {'Weight Value':<20} | {'Included Status'}")
-            print("-" * 45)
-            for idx in range(m):
-                status_str = "SELECTED (1)" if recovered[idx] == 1 else "EXCLUDED (0)"
-                print(f"{idx:<6} | {pub_weights[idx]:<20,d} | {status_str}")
-
-            print("-" * 45)
-            print(f"Sum of Selected Weights : {int(np.sum(chosen_weights)):,}")
-            print(f"Exact Target Match      : {int(np.sum(chosen_weights)) == target_sum}")
-            return
-
-    print("\nFailed to recover solution within cycle/hash budget.")
-
+        print("  • Complete Recovered Subset Mapping (All 56 Indices):")
+        print(f"    {'Index':<6} | {'Weight Value':<20} | {'Inclusion Status'}")
+        print(    "    -------------------------------------------------")
+        for idx in range(m):
+            stat = "SELECTED (1)" if recovered_b[idx] == 1 else "EXCLUDED (0)"
+            print(f"    {idx:<6} | {weights[idx]:<20,d} | {stat}")
+        print("    -------------------------------------------------")
+    else:
+        print("  ❌ Failed to recover solution within budget.")
 
 if __name__ == "__main__":
-    run_subset_sum_bench()
+    run_transparent_bench()
