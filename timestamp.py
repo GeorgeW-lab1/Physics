@@ -1,301 +1,659 @@
-#!/usr/bin/env python3
-"""
-RP-GHOST timestamp pipeline with OpenCV webcam whitening.
 
-Implements the data path from the paper "Decoding the Timestamp from the
-Optoelectronic Viewport":
-
-  schedule T = t0 + 1 s  ->  c = floor(T/1e6) mod 60000
-  -> whiten c' = c XOR h   (h = first 2 bytes of SHA-256 of grayscale webcam frame)
-  -> frame [c' | delta | CRC-8]  (40 bits)
-  -> viewport: 2000 windows x 40 Poisson slots with +-1/4 tilt and common mode
-  -> window mean, sign decision, CRC check
-  -> DE-WHITEN (the step missing in the reference program), unwrap to the
-     representative nearest the receiver clock, print Time Difference.
-
-Usage:
-  pip install numpy opencv-python
-  python rp_ghost_opencv.py                      # webcam 0, 5 cycles
-  python rp_ghost_opencv.py --camera 1 --cycles 10
-  python rp_ghost_opencv.py --no-camera          # h = 0 (no webcam)
-  python rp_ghost_opencv.py --show               # preview window + slot display
-  python rp_ghost_opencv.py --no-dewhiten        # reproduce the bug from Sec. 7
-  python rp_ghost_opencv.py --selftest           # CRC check value, round trip
-"""
-import argparse
-import hashlib
-import sys
-import time
-
+import cv2
 import numpy as np
+import hashlib
+import time
+import math
+import sys
 
-try:
-    import cv2
-except ImportError:  # allow --no-camera / --selftest without OpenCV
-    cv2 = None
+# ============================================================
+# RP-GHOST OPTOELECTRONIC TIMESTAMP RECEIVER
+# Real webcam + OpenCV + simulated photon-count viewport
+# ============================================================
 
-# --------------------------------------------------------------------------
-# Constants (Table 1 of the paper)
-# --------------------------------------------------------------------------
-LAMBDA_BASE = 1e4          # mean photon count per slot per window
-SIGMA_C = 0.005            # relative common-mode jitter
-N_SLOTS = 40               # bits per frame
-N_WINDOWS = 2000           # windows averaged per decode
-M_MS = 60_000              # residue modulus (ms)
-CRC_POLY = 0x07            # x^8 + x^2 + x + 1
-LEAD_NS = 1_000_000_000    # scheduled one second ahead
+CAMERA_INDEX = 0
 
+N_SLOTS = 40
+WINDOWS = 2000
 
-def tilt_amplitude(lam=LAMBDA_BASE, sigma_c=SIGMA_C):
-    """s = max(0.02*sigma_z, 0.25), sigma_z^2 = 1 + lam*sigma_c^2."""
-    sigma_z = np.sqrt(1.0 + lam * sigma_c ** 2)
-    return max(0.02 * sigma_z, 0.25)
+LAMBDA_BASE = 10000.0
+SIGMA_C = 0.005
+TILT = 0.25
 
+LEAD_NS = 1_000_000_000
+MINUTE_MS = 60000
 
-# --------------------------------------------------------------------------
-# CRC-8
-# --------------------------------------------------------------------------
-def crc8(data: bytes, poly: int = CRC_POLY, init: int = 0) -> int:
-    crc = init
+HOLD_UNTIL_TARGET = False
+
+rng = np.random.default_rng()
+
+# ============================================================
+# CRC-8: polynomial 0x07
+# ============================================================
+
+def crc8(data):
+    crc = 0
+
     for byte in data:
         crc ^= byte
+
         for _ in range(8):
-            crc = ((crc << 1) ^ poly) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+            if crc & 0x80:
+                crc = ((crc << 1) ^ 0x07) & 0xFF
+            else:
+                crc = (crc << 1) & 0xFF
+
     return crc
 
 
-# --------------------------------------------------------------------------
-# Webcam hash via OpenCV
-# --------------------------------------------------------------------------
-class WebcamHasher:
-    """Grabs frames with OpenCV and produces the 16-bit whitening word h."""
+# ============================================================
+# CAMERA WHITENING
+# ============================================================
 
-    def __init__(self, camera_index=0, enabled=True, show=False):
-        self.cap = None
-        self.show = show
-        self.frames = 0
-        self.latest_hash = 0
-        self.last_gray = None
-        if enabled:
-            if cv2 is None:
-                print("[warn] OpenCV not installed; whitening word h = 0", file=sys.stderr)
-            else:
-                cap = cv2.VideoCapture(camera_index)
-                if cap.isOpened():
-                    self.cap = cap
-                else:
-                    cap.release()
-                    print(f"[warn] cannot open camera {camera_index}; h = 0", file=sys.stderr)
-
-    @staticmethod
-    def hash_frame(gray: np.ndarray) -> int:
-        digest = hashlib.sha256(np.ascontiguousarray(gray).tobytes()).digest()
-        return (digest[0] << 8) | digest[1]
-
-    def grab(self) -> int:
-        """Capture one frame, return h (0 if no camera)."""
-        if self.cap is None:
-            return self.latest_hash
-        ok, frame = self.cap.read()
-        if not ok or frame is None:
-            return self.latest_hash
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        self.last_gray = gray
-        self.frames += 1
-        self.latest_hash = self.hash_frame(gray)
-        if self.show:
-            cv2.imshow("RP-GHOST webcam (gray)", gray)
-            cv2.waitKey(1)
-        return self.latest_hash
-
-    def release(self):
-        if self.cap is not None:
-            self.cap.release()
-        if cv2 is not None and self.show:
-            cv2.destroyAllWindows()
+def camera_hash(gray):
+    digest = hashlib.sha256(gray.tobytes()).digest()
+    return int.from_bytes(digest[:2], "big")
 
 
-# --------------------------------------------------------------------------
-# Framing
-# --------------------------------------------------------------------------
-def int_to_bits(value: int, width: int):
-    return [(value >> (width - 1 - k)) & 1 for k in range(width)]
+# ============================================================
+# FRAME ENCODING
+#
+# 0-15  : timestamp residue
+# 16-31 : signed price delta (cents)
+# 32-39 : CRC-8
+# ============================================================
+
+def encode_frame(timestamp_ms, delta_cents, webcam_hash):
+
+    code = timestamp_ms % MINUTE_MS
+
+    whitened_code = code ^ webcam_hash
+
+    delta_word = delta_cents & 0xFFFF
+
+    payload = (
+        whitened_code.to_bytes(2, "big") +
+        delta_word.to_bytes(2, "big")
+    )
+
+    checksum = crc8(payload)
+
+    frame = payload + bytes([checksum])
+
+    bits = np.unpackbits(
+        np.frombuffer(frame, dtype=np.uint8)
+    )
+
+    return bits.astype(np.uint8)
 
 
-def bits_to_int(bits):
-    v = 0
-    for b in bits:
-        v = (v << 1) | int(b)
-    return v
+# ============================================================
+# SIMULATED OPTOELECTRONIC CHANNEL
+#
+# Shared common-mode noise:
+# epsilon_w ~ N(0, SIGMA_C^2)
+#
+# Photon counts:
+# N_wj ~ Poisson(Lambda * (1 + epsilon_w))
+#
+# Each transmitted bit receives a +/- 0.25 tilt.
+# ============================================================
+
+def generate_viewport(bits):
+
+    epsilon = rng.normal(
+        0.0,
+        SIGMA_C,
+        WINDOWS
+    )
+
+    rates = LAMBDA_BASE * (
+        1.0 + epsilon[:, None]
+    )
+
+    rates = np.maximum(rates, 1.0)
+
+    rates = np.broadcast_to(
+        rates,
+        (WINDOWS, N_SLOTS)
+    )
+
+    photon_counts = rng.poisson(rates)
+
+    normalized = (
+        photon_counts - LAMBDA_BASE
+    ) / math.sqrt(LAMBDA_BASE)
+
+    tilt = TILT * (
+        2.0 * bits.astype(float) - 1.0
+    )
+
+    viewport = normalized + tilt[None, :]
+
+    return viewport.mean(axis=0)
 
 
-def encode_payload_bits(code: int, delta_cents: int, h: int):
-    """Whiten the residue, append signed 16-bit delta and CRC-8 -> 40 bits."""
-    c_prime = (code ^ h) & 0xFFFF
-    d = delta_cents & 0xFFFF  # two's complement
-    body = bytes([c_prime >> 8, c_prime & 0xFF, d >> 8, d & 0xFF])
-    crc = crc8(body)
-    return int_to_bits(c_prime, 16) + int_to_bits(d, 16) + int_to_bits(crc, 8)
+# ============================================================
+# BIT DECODER
+# ============================================================
+
+def decode_bits(measurements):
+
+    return (
+        measurements > 0.0
+    ).astype(np.uint8)
 
 
-def decode_payload_bits(bits):
-    """Returns (c_prime, delta_cents, crc_valid). c_prime is still whitened."""
-    c_prime = bits_to_int(bits[0:16])
-    d = bits_to_int(bits[16:32])
-    rx_crc = bits_to_int(bits[32:40])
-    body = bytes([c_prime >> 8, c_prime & 0xFF, d >> 8, d & 0xFF])
-    delta = d - 0x10000 if d & 0x8000 else d
-    return c_prime, delta, crc8(body) == rx_crc
+# ============================================================
+# FRAME DECODING AND CRC
+# ============================================================
+
+def decode_frame(bits, webcam_hash):
+
+    packed = np.packbits(bits)
+
+    data = packed.tobytes()
+
+    if len(data) != 5:
+        return None
+
+    payload = data[:4]
+    received_crc = data[4]
+
+    calculated_crc = crc8(payload)
+
+    crc_valid = (
+        received_crc == calculated_crc
+    )
+
+    if not crc_valid:
+        return None
+
+    whitened_code = int.from_bytes(
+        payload[:2], "big"
+    )
+
+    # IMPORTANT:
+    # Reverse the transmitter whitening.
+    decoded_code = (
+        whitened_code ^ webcam_hash
+    )
+
+    delta_word = int.from_bytes(
+        payload[2:4], "big"
+    )
+
+    if delta_word >= 32768:
+        delta_word -= 65536
+
+    return decoded_code, delta_word
 
 
-# --------------------------------------------------------------------------
-# Optoelectronic viewport (simulated)
-# --------------------------------------------------------------------------
-class OptoelectronicViewport:
-    def __init__(self, lam=LAMBDA_BASE, sigma_c=SIGMA_C, n_slots=N_SLOTS, seed=None):
-        self.lam = lam
-        self.sigma_c = sigma_c
-        self.n = n_slots
-        self.s = tilt_amplitude(lam, sigma_c)
-        self.rng = np.random.default_rng(seed)
+# ============================================================
+# MODULAR TIMESTAMP RECONSTRUCTION
+# ============================================================
 
-    def window_block(self, bits, n_windows=N_WINDOWS):
-        """Return Z[w, j] = (N - lam)/sqrt(lam) + s(2b_j - 1)."""
-        t = self.s * (2 * np.asarray(bits, dtype=float) - 1)
-        eps = self.rng.normal(0.0, self.sigma_c, size=(n_windows, 1))  # common mode
-        rate = np.maximum(self.lam * (1.0 + eps), 1.0)                 # clip at 1
-        counts = self.rng.poisson(rate, size=(n_windows, self.n))
-        x = (counts - self.lam) / np.sqrt(self.lam)
-        return x + t
+def reconstruct_timestamp(code, reference_ns):
 
-    @staticmethod
-    def decide(z_block):
-        m = z_block.mean(axis=0)
-        return (m > 0).astype(int).tolist(), m
+    reference_ms = reference_ns // 1_000_000
+
+    # Select the nearest representative of:
+    # code + 60000 * Z
+
+    minute_number = (
+        reference_ms - code + MINUTE_MS // 2
+    ) // MINUTE_MS
+
+    decoded_ms = (
+        code + minute_number * MINUTE_MS
+    )
+
+    return decoded_ms * 1_000_000
 
 
-# --------------------------------------------------------------------------
-# Modular reconstruction (Theorem 3), integer arithmetic in ns
-# --------------------------------------------------------------------------
-def unwrap_to_clock(code_ms: int, receiver_ns: int, modulus_ms: int = M_MS) -> int:
-    """Representative of code_ms + modulus*Z (in ns) nearest to receiver_ns."""
-    mod_ns = modulus_ms * 1_000_000
-    c_ns = code_ms * 1_000_000
-    k = (receiver_ns - c_ns + mod_ns // 2) // mod_ns   # round to nearest
-    return c_ns + k * mod_ns
+# ============================================================
+# OPENCV DASHBOARD
+# ============================================================
+
+def draw_dashboard(
+    measurements,
+    decoded,
+    crc_status,
+    deadline_status,
+    latency_ms,
+    slack_ms,
+    webcam_hash,
+    target_ns,
+    released=False
+):
+
+    height = 620
+    width = 1000
+
+    panel = np.zeros(
+        (height, width, 3),
+        dtype=np.uint8
+    )
+
+    panel[:] = (20, 24, 30)
+
+    def text(label, x, y, scale=0.65,
+             color=(220, 220, 220)):
+
+        cv2.putText(
+            panel,
+            str(label),
+            (x, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            color,
+            1,
+            cv2.LINE_AA
+        )
+
+    text("RP-GHOST OPTOELECTRONIC RECEIVER",
+         25, 38, 0.85, (100, 220, 255))
+
+    text("40 CHANNEL PHOTON VIEWPORT",
+         25, 85, 0.65)
+
+    # Display all 40 channel measurements.
+
+    for i, value in enumerate(measurements):
+
+        x = 25 + (i % 10) * 95
+        y = 115 + (i // 10) * 72
+
+        cv2.rectangle(
+            panel,
+            (x, y),
+            (x + 70, y + 35),
+            (65, 65, 65),
+            1
+        )
+
+        bar_length = int(
+            min(abs(value) * 100, 65)
+        )
+
+        if value >= 0:
+            color = (80, 220, 100)
+            start = x + 35
+            end = min(x + 35 + bar_length, x + 69)
+        else:
+            color = (80, 100, 240)
+            start = max(x + 35 - bar_length, x + 1)
+            end = x + 35
+
+        cv2.line(
+            panel,
+            (start, y + 17),
+            (end, y + 17),
+            color,
+            5
+        )
+
+        text(str(i), x, y + 51, 0.4)
+
+    # Receiver status
+
+    text("DECODER STATUS", 25, 420, 0.7,
+         (100, 220, 255))
+
+    text("Webcam hash: 0x%04X" % webcam_hash,
+         25, 455)
+
+    text("CRC: " + str(crc_status),
+         25, 485)
+
+    text("Deadline: " + str(deadline_status),
+         25, 515)
+
+    text("Decode latency: %.3f ms" % latency_ms,
+         25, 545)
+
+    text("Remaining slack: %.3f ms" % slack_ms,
+         25, 575)
+
+    if decoded is not None:
+
+        text(
+            "Timestamp: " +
+            time.strftime(
+                "%H:%M:%S",
+                time.localtime(decoded / 1e9)
+            ),
+            520, 455, 0.65,
+            (100, 255, 150)
+        )
+
+        text(
+            "Released: " + str(released),
+            520, 485
+        )
+
+    cv2.imshow(
+        "RP-GHOST Receiver",
+        panel
+    )
 
 
-# --------------------------------------------------------------------------
-# One transmit/receive cycle
-# --------------------------------------------------------------------------
-def run_cycle(viewport, hasher, delta_cents=0, dewhiten=True, w=N_WINDOWS):
-    t0 = time.time_ns()
-    h = hasher.grab()
-    scheduled_ns = t0 + LEAD_NS
-    t_ms = scheduled_ns // 1_000_000
-    code = t_ms % M_MS
+# ============================================================
+# MAIN
+# ============================================================
 
-    bits = encode_payload_bits(code, delta_cents, h)
-    z = viewport.window_block(bits, w)
-    rx_bits, m = viewport.decide(z)
-    bit_errors = int(np.sum(np.array(bits) != np.array(rx_bits)))
-
-    c_prime, delta_rx, crc_ok = decode_payload_bits(rx_bits)
-    c_hat = (c_prime ^ h) & 0xFFFF if dewhiten else c_prime
-    # Receiver clock R = t0 (as in the paper)
-    t_hat_ns = unwrap_to_clock(c_hat, t0)
-    diff_s = (t_hat_ns - t0) / 1e9
-    return dict(h=h, code=code, bits=bits, rx_bits=rx_bits, m=m,
-                bit_errors=bit_errors, crc_ok=crc_ok, delta=delta_rx,
-                t_hat_ns=t_hat_ns, diff_s=diff_s)
-
-
-def render_viewport(m, bits, s):
-    """Small OpenCV picture of the 40 window means (cv2.imshow)."""
-    img = np.full((140, 40 * 16, 3), 255, np.uint8)
-    for j, mj in enumerate(m):
-        x0 = j * 16
-        y = int(70 - np.clip(mj / (1.5 * s), -1, 1) * 60)
-        colour = (0, 160, 0) if (mj > 0) == bool(bits[j]) else (0, 0, 255)
-        cv2.rectangle(img, (x0 + 2, min(y, 70)), (x0 + 13, max(y, 70)), colour, -1)
-    cv2.line(img, (0, 70), (img.shape[1], 70), (0, 0, 0), 1)
-    cv2.putText(img, "window means m_j (green = correct)", (4, 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
-    return img
-
-
-# --------------------------------------------------------------------------
-# Self-test
-# --------------------------------------------------------------------------
-def selftest():
-    assert crc8(b"123456789") == 0xF4, "CRC-8 check value mismatch"
-    rng = np.random.default_rng(1)
-    for _ in range(1000):
-        code = int(rng.integers(0, M_MS))
-        h = int(rng.integers(0, 65536))
-        delta = int(rng.integers(-32768, 32768))
-        bits = encode_payload_bits(code, delta, h)
-        c_prime, d, ok = decode_payload_bits(bits)
-        assert ok and d == delta and (c_prime ^ h) == code
-    # Theorem 3: reconstruction within +-30 s of the clock
-    R = time.time_ns()
-    for off_ms in (-29_999, -1, 0, 1_000, 29_999):
-        T = R + off_ms * 1_000_000
-        T_ms = T // 1_000_000
-        assert unwrap_to_clock(T_ms % M_MS, R) // 1_000_000 == T_ms
-    # Statistical check of Eq. (7): bit error rate at W = 200 ~ 7.8e-4
-    vp = OptoelectronicViewport(seed=7)
-    errs = 0
-    trials = 4000
-    for _ in range(trials):
-        b = rng.integers(0, 2, N_SLOTS).tolist()
-        rx, _ = vp.decide(vp.window_block(b, 200))
-        errs += int(np.sum(np.array(b) != np.array(rx)))
-    ber = errs / (trials * N_SLOTS)
-    print(f"selftest OK  (BER at W=200: {ber:.2e}, theory 7.83e-04)")
-
-
-# --------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--camera", type=int, default=0, help="OpenCV camera index")
-    ap.add_argument("--no-camera", action="store_true", help="do not open a camera (h = 0)")
-    ap.add_argument("--cycles", type=int, default=5)
-    ap.add_argument("--windows", type=int, default=N_WINDOWS)
-    ap.add_argument("--delta", type=int, default=0, help="price delta in cents (signed 16-bit)")
-    ap.add_argument("--no-dewhiten", action="store_true", help="reproduce the reference bug (Sec. 7)")
-    ap.add_argument("--show", action="store_true", help="show webcam and viewport windows")
-    ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--selftest", action="store_true")
-    args = ap.parse_args()
 
-    if args.selftest:
-        selftest()
+    print("=" * 65)
+    print("RP-GHOST OPENCV TIMESTAMP DECODER")
+    print("=" * 65)
+
+    camera = cv2.VideoCapture(CAMERA_INDEX)
+
+    if not camera.isOpened():
+        print("[ERROR] Cannot open webcam.")
         return
 
-    if args.show and cv2 is None:
-        print("[warn] --show requires OpenCV", file=sys.stderr)
-        args.show = False
+    camera.set(
+        cv2.CAP_PROP_FRAME_WIDTH,
+        640
+    )
 
-    hasher = WebcamHasher(args.camera, enabled=not args.no_camera, show=args.show)
-    viewport = OptoelectronicViewport(seed=args.seed)
-    print(f"s = {viewport.s:.4f}, W = {args.windows}, de-whitening = {not args.no_dewhiten}")
+    camera.set(
+        cv2.CAP_PROP_FRAME_HEIGHT,
+        480
+    )
+
+    total = 0
+    successful = 0
+    missed = 0
+
+    latencies = []
 
     try:
-        for i in range(1, args.cycles + 1):
-            r = run_cycle(viewport, hasher, args.delta, not args.no_dewhiten, args.windows)
-            print(f"[{i}] Frames: {hasher.frames}  h=0x{r['h']:04X}  "
-                  f"bit errors: {r['bit_errors']}  CRC: {'OK' if r['crc_ok'] else 'FAIL'}  "
-                  f"delta: {r['delta']:+d}c")
-            if r["crc_ok"]:
-                print(f"    Time Difference: {r['diff_s']:+.3f} s")
+
+        while True:
+
+            # ------------------------------------------------
+            # 1. Capture a real webcam frame
+            # ------------------------------------------------
+
+            ret, frame = camera.read()
+
+            if not ret:
+                print("[ERROR] Camera frame unavailable.")
+                break
+
+            gray = cv2.cvtColor(
+                frame,
+                cv2.COLOR_BGR2GRAY
+            )
+
+            webcam_h = camera_hash(gray)
+
+            # ------------------------------------------------
+            # 2. Schedule timestamp one second ahead
+            # ------------------------------------------------
+
+            start_ns = time.time_ns()
+
+            target_ns = start_ns + LEAD_NS
+
+            timestamp_ms = (
+                target_ns // 1_000_000
+            )
+
+            # ------------------------------------------------
+            # 3. Encode 40-bit frame
+            # ------------------------------------------------
+
+            bits = encode_frame(
+                timestamp_ms,
+                0,
+                webcam_h
+            )
+
+            # ------------------------------------------------
+            # 4. Generate simulated viewport
+            # ------------------------------------------------
+
+            measurements = generate_viewport(bits)
+
+            # ------------------------------------------------
+            # 5. Decode 40 channels
+            # ------------------------------------------------
+
+            decoded_bits = decode_bits(
+                measurements
+            )
+
+            # ------------------------------------------------
+            # 6. Decode CRC and payload
+            # ------------------------------------------------
+
+            result = decode_frame(
+                decoded_bits,
+                webcam_h
+            )
+
+            decode_finished_ns = time.time_ns()
+
+            latency_ms = (
+                decode_finished_ns - start_ns
+            ) / 1e6
+
+            total += 1
+
+            decoded_ns = None
+            crc_status = "FAIL"
+            deadline_status = "NOT ACCEPTED"
+            slack_ms = 0.0
+
+            # ------------------------------------------------
+            # 7. Reconstruct timestamp
+            # ------------------------------------------------
+
+            if result is not None:
+
+                decoded_code, delta = result
+
+                decoded_ns = reconstruct_timestamp(
+                    decoded_code,
+                    start_ns
+                )
+
+                # ------------------------------------------------
+                # 8. Decode deadline test
+                # ------------------------------------------------
+
+                slack_ms = (
+                    decoded_ns - decode_finished_ns
+                ) / 1e6
+
+                crc_status = "PASS"
+
+                if slack_ms > 0:
+
+                    successful += 1
+                    deadline_status = "PASS"
+
+                    latencies.append(latency_ms)
+
+                    print(
+                        "[DECODE %05d] CRC=PASS | "
+                        "Time difference=%.6f s | "
+                        "Latency=%.3f ms | "
+                        "Slack=%.3f ms | "
+                        "Hash=0x%04X"
+                        % (
+                            total,
+                            (decoded_ns - start_ns) / 1e9,
+                            latency_ms,
+                            slack_ms,
+                            webcam_h
+                        )
+                    )
+
+                else:
+
+                    missed += 1
+
+                    deadline_status = "MISSED"
+
+                    print(
+                        "[MISSED] Decode completed "
+                        "after target timestamp."
+                    )
+
             else:
-                print("    CRC mismatch, frame discarded (resend)")
-            if args.show:
-                cv2.imshow("RP-GHOST viewport", render_viewport(r["m"], r["bits"], viewport.s))
-                cv2.waitKey(300)
+
+                missed += 1
+
+                print(
+                    "[ERROR] CRC mismatch. "
+                    "Frame rejected."
+                )
+
+            # ------------------------------------------------
+            # 9. Display webcam
+            # ------------------------------------------------
+
+            cv2.putText(
+                frame,
+                "LIVE WEBCAM | SHA256 WHITENING",
+                (15, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 100),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                "Hash: %04X" % webcam_h,
+                (15, 60),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 100),
+                1
+            )
+
+            cv2.imshow(
+                "OpenCV Camera",
+                frame
+            )
+
+            # ------------------------------------------------
+            # 10. Receiver dashboard
+            # ------------------------------------------------
+
+            draw_dashboard(
+                measurements,
+                decoded_ns,
+                crc_status,
+                deadline_status,
+                latency_ms,
+                slack_ms,
+                webcam_h,
+                target_ns
+            )
+
+            # ------------------------------------------------
+            # 11. Optional hold-until-target rule
+            # ------------------------------------------------
+
+            if (
+                HOLD_UNTIL_TARGET
+                and decoded_ns is not None
+                and slack_ms > 0
+            ):
+
+                while time.time_ns() < decoded_ns:
+
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        return
+
+                    remaining = (
+                        decoded_ns - time.time_ns()
+                    ) / 1e9
+
+                    if remaining > 0.002:
+                        time.sleep(
+                            min(remaining - 0.001, 0.01)
+                        )
+
+                release_ns = time.time_ns()
+
+                release_error_ms = (
+                    release_ns - decoded_ns
+                ) / 1e6
+
+                print(
+                    "[RELEASE] Target reached | "
+                    "Release error: %.3f ms"
+                    % release_error_ms
+                )
+
+            # ------------------------------------------------
+            # 12. Statistics
+            # ------------------------------------------------
+
+            if total % 20 == 0:
+
+                mean_latency = (
+                    np.mean(latencies)
+                    if latencies else 0
+                )
+
+                print("-" * 60)
+
+                print(
+                    "Cycles: %d | Successful: %d | "
+                    "Missed: %d"
+                    % (total, successful, missed)
+                )
+
+                print(
+                    "Mean decode latency: %.3f ms"
+                    % mean_latency
+                )
+
+                print("-" * 60)
+
+            # Quit with Q or ESC
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("q") or key == 27:
+                break
+
+    except KeyboardInterrupt:
+
+        print("\n[STOP] Keyboard interrupt.")
+
     finally:
-        hasher.release()
+
+        camera.release()
+        cv2.destroyAllWindows()
+
+        print("\n========== FINAL STATISTICS ==========")
+
+        print("Total cycles:", total)
+        print("Successful:", successful)
+        print("Missed:", missed)
+
+        if latencies:
+            print(
+                "Mean latency: %.3f ms"
+                % np.mean(latencies)
+            )
+
+            print(
+                "Maximum latency: %.3f ms"
+                % np.max(latencies)
+            )
+
+        print("======================================")
 
 
 if __name__ == "__main__":
