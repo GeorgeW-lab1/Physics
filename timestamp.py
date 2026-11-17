@@ -1,4 +1,3 @@
-
 import cv2
 import numpy as np
 import hashlib
@@ -20,10 +19,11 @@ LAMBDA_BASE = 10000.0
 SIGMA_C = 0.005
 TILT = 0.25
 
-LEAD_NS = 1_000_000_000
+LEAD_NS = 1_000_000_000_0  # 1 second lead time
 MINUTE_MS = 60000
 
-HOLD_UNTIL_TARGET = False
+# Enable the latch-and-hold synchronization rule
+HOLD_UNTIL_TARGET = True
 
 rng = np.random.default_rng()
 
@@ -57,10 +57,6 @@ def camera_hash(gray):
 
 # ============================================================
 # FRAME ENCODING
-#
-# 0-15  : timestamp residue
-# 16-31 : signed price delta (cents)
-# 32-39 : CRC-8
 # ============================================================
 
 def encode_frame(timestamp_ms, delta_cents, webcam_hash):
@@ -89,14 +85,6 @@ def encode_frame(timestamp_ms, delta_cents, webcam_hash):
 
 # ============================================================
 # SIMULATED OPTOELECTRONIC CHANNEL
-#
-# Shared common-mode noise:
-# epsilon_w ~ N(0, SIGMA_C^2)
-#
-# Photon counts:
-# N_wj ~ Poisson(Lambda * (1 + epsilon_w))
-#
-# Each transmitted bit receives a +/- 0.25 tilt.
 # ============================================================
 
 def generate_viewport(bits):
@@ -173,8 +161,6 @@ def decode_frame(bits, webcam_hash):
         payload[:2], "big"
     )
 
-    # IMPORTANT:
-    # Reverse the transmitter whitening.
     decoded_code = (
         whitened_code ^ webcam_hash
     )
@@ -196,9 +182,6 @@ def decode_frame(bits, webcam_hash):
 def reconstruct_timestamp(code, reference_ns):
 
     reference_ms = reference_ns // 1_000_000
-
-    # Select the nearest representative of:
-    # code + 60000 * Z
 
     minute_number = (
         reference_ms - code + MINUTE_MS // 2
@@ -251,13 +234,11 @@ def draw_dashboard(
             cv2.LINE_AA
         )
 
-    text("RP-GHOST OPTOELECTRONIC RECEIVER",
+    text("RP-GHOST OPTOELECTRONIC RECEIVER [LATCHED]",
          25, 38, 0.85, (100, 220, 255))
 
     text("40 CHANNEL PHOTON VIEWPORT",
          25, 85, 0.65)
-
-    # Display all 40 channel measurements.
 
     for i, value in enumerate(measurements):
 
@@ -294,8 +275,6 @@ def draw_dashboard(
         )
 
         text(str(i), x, y + 51, 0.4)
-
-    # Receiver status
 
     text("DECODER STATUS", 25, 420, 0.7,
          (100, 220, 255))
@@ -345,7 +324,7 @@ def draw_dashboard(
 def main():
 
     print("=" * 65)
-    print("RP-GHOST OPENCV TIMESTAMP DECODER")
+    print("RP-GHOST OPENCV TIMESTAMP DECODER [LATCHED MODE]")
     print("=" * 65)
 
     camera = cv2.VideoCapture(CAMERA_INDEX)
@@ -354,29 +333,24 @@ def main():
         print("[ERROR] Cannot open webcam.")
         return
 
-    camera.set(
-        cv2.CAP_PROP_FRAME_WIDTH,
-        640
-    )
-
-    camera.set(
-        cv2.CAP_PROP_FRAME_HEIGHT,
-        480
-    )
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     total = 0
     successful = 0
     missed = 0
 
     latencies = []
+    latched_target_ns = None
 
     try:
+        start_ns = time.time_ns()
 
+        if latched_target_ns is None or start_ns >= latched_target_ns:
+            latched_target_ns = start_ns + LEAD_NS
         while True:
 
-            # ------------------------------------------------
-            # 1. Capture a real webcam frame
-            # ------------------------------------------------
+            start_ns = time.time_ns()
 
             ret, frame = camera.read()
 
@@ -392,44 +366,33 @@ def main():
             webcam_h = camera_hash(gray)
 
             # ------------------------------------------------
-            # 2. Schedule timestamp one second ahead
+            # 1. Hardware Latch Logic:
+            # Hold/lock the target timestamp steady until the 
+            # current time reaches or exceeds it.
             # ------------------------------------------------
 
-            start_ns = time.time_ns()
+            if latched_target_ns is not None and start_ns >= latched_target_ns:
+                latched_target_ns = start_ns + LEAD_NS
 
-            target_ns = start_ns + LEAD_NS
-
-            timestamp_ms = (
-                target_ns // 1_000_000
-            )
+            target_ns = latched_target_ns
+            target_ms = target_ns // 1_000_000
 
             # ------------------------------------------------
-            # 3. Encode 40-bit frame
+            # 2. Encode latched target timestamp into frame
             # ------------------------------------------------
 
             bits = encode_frame(
-                timestamp_ms,
+                target_ms,
                 0,
                 webcam_h
             )
 
             # ------------------------------------------------
-            # 4. Generate simulated viewport
+            # 3. Generate simulated viewport & decode
             # ------------------------------------------------
 
             measurements = generate_viewport(bits)
-
-            # ------------------------------------------------
-            # 5. Decode 40 channels
-            # ------------------------------------------------
-
-            decoded_bits = decode_bits(
-                measurements
-            )
-
-            # ------------------------------------------------
-            # 6. Decode CRC and payload
-            # ------------------------------------------------
+            decoded_bits = decode_bits(measurements)
 
             result = decode_frame(
                 decoded_bits,
@@ -448,10 +411,7 @@ def main():
             crc_status = "FAIL"
             deadline_status = "NOT ACCEPTED"
             slack_ms = 0.0
-
-            # ------------------------------------------------
-            # 7. Reconstruct timestamp
-            # ------------------------------------------------
+            released = False
 
             if result is not None:
 
@@ -461,10 +421,6 @@ def main():
                     decoded_code,
                     start_ns
                 )
-
-                # ------------------------------------------------
-                # 8. Decode deadline test
-                # ------------------------------------------------
 
                 slack_ms = (
                     decoded_ns - decode_finished_ns
@@ -481,7 +437,7 @@ def main():
 
                     print(
                         "[DECODE %05d] CRC=PASS | "
-                        "Time difference=%.6f s | "
+                        "Latched Delta=%.3f s | "
                         "Latency=%.3f ms | "
                         "Slack=%.3f ms | "
                         "Hash=0x%04X"
@@ -495,29 +451,15 @@ def main():
                     )
 
                 else:
-
                     missed += 1
-
                     deadline_status = "MISSED"
-
-                    print(
-                        "[MISSED] Decode completed "
-                        "after target timestamp."
-                    )
+                    print("[MISSED] Decode completed after target timestamp.")
 
             else:
-
                 missed += 1
+                print("[ERROR] CRC mismatch. Frame rejected.")
 
-                print(
-                    "[ERROR] CRC mismatch. "
-                    "Frame rejected."
-                )
-
-            # ------------------------------------------------
-            # 9. Display webcam
-            # ------------------------------------------------
-
+            # Display webcam feed & dashboard
             cv2.putText(
                 frame,
                 "LIVE WEBCAM | SHA256 WHITENING",
@@ -538,14 +480,7 @@ def main():
                 1
             )
 
-            cv2.imshow(
-                "OpenCV Camera",
-                frame
-            )
-
-            # ------------------------------------------------
-            # 10. Receiver dashboard
-            # ------------------------------------------------
+            cv2.imshow("OpenCV Camera", frame)
 
             draw_dashboard(
                 measurements,
@@ -555,11 +490,12 @@ def main():
                 latency_ms,
                 slack_ms,
                 webcam_h,
-                target_ns
+                target_ns,
+                released
             )
 
             # ------------------------------------------------
-            # 11. Optional hold-until-target rule
+            # 4. Optional Hold-Until-Target Latch Rule
             # ------------------------------------------------
 
             if (
@@ -583,44 +519,27 @@ def main():
                         )
 
                 release_ns = time.time_ns()
+                released = True
 
                 release_error_ms = (
                     release_ns - decoded_ns
                 ) / 1e6
 
                 print(
-                    "[RELEASE] Target reached | "
+                    "[RELEASE] Latch target reached | "
                     "Release error: %.3f ms"
                     % release_error_ms
                 )
 
-            # ------------------------------------------------
-            # 12. Statistics
-            # ------------------------------------------------
+                # Reset the latch so a new target is captured after release
+                latched_target_ns = start_ns + LEAD_NS
 
             if total % 20 == 0:
-
-                mean_latency = (
-                    np.mean(latencies)
-                    if latencies else 0
-                )
-
+                mean_latency = np.mean(latencies) if latencies else 0
                 print("-" * 60)
-
-                print(
-                    "Cycles: %d | Successful: %d | "
-                    "Missed: %d"
-                    % (total, successful, missed)
-                )
-
-                print(
-                    "Mean decode latency: %.3f ms"
-                    % mean_latency
-                )
-
+                print(f"Cycles: {total} | Successful: {successful} | Missed: {missed}")
+                print(f"Mean decode latency: {mean_latency:.3f} ms")
                 print("-" * 60)
-
-            # Quit with Q or ESC
 
             key = cv2.waitKey(1) & 0xFF
 
@@ -628,31 +547,20 @@ def main():
                 break
 
     except KeyboardInterrupt:
-
         print("\n[STOP] Keyboard interrupt.")
 
     finally:
-
         camera.release()
         cv2.destroyAllWindows()
 
         print("\n========== FINAL STATISTICS ==========")
-
         print("Total cycles:", total)
         print("Successful:", successful)
         print("Missed:", missed)
 
         if latencies:
-            print(
-                "Mean latency: %.3f ms"
-                % np.mean(latencies)
-            )
-
-            print(
-                "Maximum latency: %.3f ms"
-                % np.max(latencies)
-            )
-
+            print(f"Mean latency: {np.mean(latencies):.3f} ms")
+            print(f"Maximum latency: {np.max(latencies):.3f} ms")
         print("======================================")
 
 
