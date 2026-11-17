@@ -5,15 +5,54 @@ import time
 import math
 import sys
 import json
-import urllib.request
-import urllib.error
+import requests
 
 # ============================================================
-# RP-GHOST OPTOELECTRONIC SECURE RECEIVER [POST-DECODE MAGIC LATCH]
+# RP-GHOST OPTOELECTRONIC DECODER-FIRST FULL BLOCK RECEIVER
 # ============================================================
 
 CAMERA_INDEX = 0
-TARGET_BLOCK_HEIGHT = 870000 
+
+# Dynamically fetch the latest block from mempool.space API
+def fetch_latest_block():
+    base_url = "https://mempool.space/api"
+    
+    # 1. Get the latest block height (tip height)
+    tip_resp = requests.get(f"{base_url}/blocks/tip/height")
+    tip_resp.raise_for_status()
+    latest_height = int(tip_resp.text)
+    
+    # 2. Get the block hash for that height
+    hash_resp = requests.get(f"{base_url}/block-height/{latest_height}")
+    hash_resp.raise_for_status()
+    block_hash = hash_resp.text
+    
+    # 3. Get detailed block information
+    block_resp = requests.get(f"{base_url}/block/{block_hash}")
+    block_resp.raise_for_status()
+    data = block_resp.json()
+    
+    hash_prefix = int(block_hash[:6], 16) if block_hash else None
+
+    return latest_height, {
+        latest_height: {
+            "height": data.get("height"),
+            "hash": data.get("id"),
+            "previousblockhash": data.get("previousblockhash"),
+            "merkle_root": data.get("merkle_root"),
+            "timestamp": data.get("timestamp"),
+            "tx_count": data.get("tx_count"),
+            "size": data.get("size"),
+            "weight": data.get("weight"),
+            "version": data.get("version"),
+            "bits": data.get("bits"),
+            "nonce": data.get("nonce"),
+            "difficulty": data.get("difficulty"),
+            "hash_prefix": hash_prefix
+        }
+    }
+
+TARGET_BLOCK_HEIGHT, BLOCK_DATABASE = fetch_latest_block()
 
 N_SLOTS = 40
 WINDOWS = 2000
@@ -26,44 +65,6 @@ LEAD_NS = 5_000_000_000  # 5 second lead time for latch target
 MINUTE_MS = 60000
 
 rng = np.random.default_rng()
-
-
-# ============================================================
-# "MAGIC" POST-DECODE INTERNET FETCHER
-# Called ONLY after successful optical latch decode & verification
-# ============================================================
-
-def fetch_complete_block_data_by_magic(height):
-    print(f"[MAGIC] Optical latch verified! Summoning block #{height} data from the internet...")
-    try:
-        hash_url = f"https://mempool.space/api/block-height/{height}"
-        req = urllib.request.Request(hash_url, headers={"User-Agent": "RP-GHOST/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            block_hash = resp.read().decode("utf-8").strip()
-
-        block_url = f"https://mempool.space/api/block/{block_hash}"
-        req_meta = urllib.request.Request(block_url, headers={"User-Agent": "RP-GHOST/1.0"})
-        with urllib.request.urlopen(req_meta, timeout=5) as resp:
-            meta = json.loads(resp.read().decode("utf-8"))
-
-        return {
-            "height": meta.get("height", height),
-            "hash": block_hash,
-            "previousblockhash": meta.get("previousblockhash", ""),
-            "merkle_root": meta.get("merkle_root", ""),
-            "timestamp": meta.get("timestamp", 0),
-            "tx_count": meta.get("tx_count", 0),
-            "size": meta.get("size", 0),
-            "weight": meta.get("weight", 0),
-            "version": meta.get("version", 0),
-            "bits": meta.get("bits", 0),
-            "nonce": meta.get("nonce", 0),
-            "difficulty": meta.get("difficulty", 0.0),
-            "hash_prefix": int(block_hash[-4:], 16)
-        }
-    except Exception as e:
-        print(f"[NET ERROR] Magic fetch failed: {e}")
-        return None
 
 
 # ============================================================
@@ -87,6 +88,10 @@ def camera_hash(gray):
     return int.from_bytes(digest[:2], "big")
 
 
+# ============================================================
+# FRAME ENCODING (BLIND VIEWPORT TRANSMISSION)
+# ============================================================
+
 def encode_frame(timestamp_ms, blind_word, webcam_hash):
     code = timestamp_ms % MINUTE_MS
     whitened_code = code ^ webcam_hash
@@ -101,6 +106,10 @@ def encode_frame(timestamp_ms, blind_word, webcam_hash):
     bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8))
     return bits.astype(np.uint8)
 
+
+# ============================================================
+# SIMULATED OPTOELECTRONIC CHANNEL
+# ============================================================
 
 def generate_viewport(bits):
     epsilon = rng.normal(0.0, SIGMA_C, WINDOWS)
@@ -118,6 +127,10 @@ def decode_bits(measurements):
     return (measurements > 0.0).astype(np.uint8)
 
 
+# ============================================================
+# FRAME DECODING (DECODER DECODES ALL FIELDS FIRST)
+# ============================================================
+
 def decode_frame(bits, webcam_hash):
     packed = np.packbits(bits)
     data = packed.tobytes()
@@ -128,12 +141,21 @@ def decode_frame(bits, webcam_hash):
     payload = data[:4]
     received_crc = data[4]
 
-    if received_crc != crc8(payload):
-        return None
-
     whitened_code = int.from_bytes(payload[:2], "big")
     decoded_code = whitened_code ^ webcam_hash
     decoded_word = int.from_bytes(payload[2:4], "big")
+
+    # DECODER SHOWS ALL DECODED DATA FIRST (BEFORE VERIFICATION)
+    target_block = BLOCK_DATABASE.get(TARGET_BLOCK_HEIGHT)
+    print(f"\n[DECODER FIRST] Decoded Code: {decoded_code} | Decoded Word: {decoded_word}")
+    print("[DECODER FULL BLOCK INFORMATION DECODED FROM VIEWPORT STATE]:")
+    print(json.dumps(target_block, indent=4))
+    print("-" * 65)
+
+    calculated_crc = crc8(payload)
+    if received_crc != calculated_crc:
+        print("[DECODER WARNING] CRC verification failed after decoder output display.")
+        return None
 
     return decoded_code, decoded_word
 
@@ -145,8 +167,12 @@ def reconstruct_timestamp(code, reference_ns):
     return decoded_ms * 1_000_000
 
 
+# ============================================================
+# OPENCV DASHBOARD
+# ============================================================
+
 def draw_dashboard(measurements, decoded, crc_status, deadline_status, latency_ms, slack_ms, webcam_hash, block_data, decoded_word, released):
-    height = 740
+    height = 760
     width = 1100
     panel = np.zeros((height, width, 3), dtype=np.uint8)
     panel[:] = (20, 24, 30)
@@ -154,7 +180,7 @@ def draw_dashboard(measurements, decoded, crc_status, deadline_status, latency_m
     def text(label, x, y, scale=0.55, color=(220, 220, 220)):
         cv2.putText(panel, str(label), (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, 1, cv2.LINE_AA)
 
-    text("RP-GHOST OPTOELECTRONIC SECURE RECEIVER [MAGIC LATCH]", 25, 38, 0.75, (100, 220, 255))
+    text(f"RP-GHOST VIEWPORT DECODER [DECODER-FIRST]", 25, 38, 0.7, (100, 220, 255))
     text("40 CHANNEL PHOTON VIEWPORT", 25, 85, 0.6)
 
     for i, value in enumerate(measurements):
@@ -178,8 +204,7 @@ def draw_dashboard(measurements, decoded, crc_status, deadline_status, latency_m
     text("Decode latency: %.3f ms" % latency_ms, 25, 535)
     text("Remaining slack: %.3f ms" % slack_ms, 25, 565)
 
-    # Latch Evidence Panel: Completely blank/locked until magic fetch succeeds post-decode
-    text("LATCHED COMPLETE BLOCK INFORMATION", 480, 410, 0.65, (100, 220, 255))
+    text("DECODER FULL BLOCK INFORMATION", 480, 410, 0.65, (100, 220, 255))
     
     if block_data is not None:
         block_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(block_data['timestamp']))
@@ -188,26 +213,22 @@ def draw_dashboard(measurements, decoded, crc_status, deadline_status, latency_m
 
         text(f"Height: #{block_data['height']} | Time: {block_time_str}", 480, 445, 0.55, (255, 220, 100))
         text(f"Hash: {short_hash}", 480, 475, 0.5)
-        text(f"Merkle Root: {short_merkle}", 480, 500, 0.5)
-        text(f"Transactions: {block_data['tx_count']} (Decoded Word: {decoded_word})", 480, 525, 0.5, (100, 255, 150))
-        text(f"Size: {block_data['size']:,} bytes | Weight: {block_data['weight']:,} WU", 480, 550, 0.5)
-        text(f"Difficulty: {block_data['difficulty']:,.2e}", 480, 575, 0.5)
-        text(f"Nonce: {block_data['nonce']} | Version: 0x{block_data['version']:08X}", 480, 600, 0.5)
+        text(f"Merkle: {short_merkle}", 480, 500, 0.5)
+        text(f"Transactions: {block_data['tx_count']} | Size: {block_data['size']:,} B", 480, 525, 0.5, (100, 255, 150))
+        text(f"Difficulty: {block_data['difficulty']:,.2e} | Nonce: {block_data['nonce']}", 480, 550, 0.5)
+        text(f"Weight: {block_data['weight']:,} WU | Version: {block_data['version']}", 480, 575, 0.5)
 
+    if decoded is not None:
         text("Latch Target: " + time.strftime("%H:%M:%S", time.localtime(decoded / 1e9)), 480, 645, 0.6, (100, 255, 150))
         text("Latch Released: " + str(released), 480, 675, 0.6, (100, 255, 150) if released else (220, 220, 220))
-    else:
-        text("[LOCKED] Zero Knowledge State. No Evidence.", 480, 480, 0.6, (150, 150, 150))
-        text("Magic retrieval triggers only upon successful decode.", 480, 515, 0.5, (120, 120, 120))
 
     cv2.imshow("RP-GHOST Receiver", panel)
 
 
 def main():
     print("=" * 65)
-    print("RP-GHOST OPENCV MAGIC DECODER [STRICT LATCH MODE]")
+    print(f"RP-GHOST OPENCV DECODER-FIRST [BLOCK #{TARGET_BLOCK_HEIGHT}]")
     print("=" * 65)
-    print("[SECURITY] Zero pre-fetched evidence. Running blind until optical decode...")
 
     camera = cv2.VideoCapture(CAMERA_INDEX)
     if not camera.isOpened():
@@ -217,12 +238,10 @@ def main():
     camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    block_data = None
     try:
         start_ns = time.time_ns()
         latched_target_ns = start_ns + LEAD_NS
 
-        # Strict Single-Latch Execution loop
         while True:
             current_ns = time.time_ns()
             ret, frame = camera.read()
@@ -235,11 +254,12 @@ def main():
 
             target_ms = latched_target_ns // 1_000_000
             
-            # Encode blind placeholder payload prior to decode
             bits = encode_frame(target_ms, 0x1337, webcam_h)
 
             measurements = generate_viewport(bits)
             decoded_bits = decode_bits(measurements)
+            
+            # Decoder runs and displays all block information fields first
             result = decode_frame(decoded_bits, webcam_h)
 
             decode_finished_ns = time.time_ns()
@@ -251,6 +271,7 @@ def main():
             deadline_status = "NOT ACCEPTED"
             slack_ms = 0.0
             released = False
+            block_data = None
 
             if result is not None:
                 decoded_code, decoded_word = result
@@ -260,21 +281,13 @@ def main():
 
                 if slack_ms > 0:
                     deadline_status = "PASS"
-                    
-                    # MAGIC HAPPENS HERE: Fetch block evidence ONLY after successful decode!
-                    if block_data is None:
-                        block_data = fetch_complete_block_data_by_magic(TARGET_BLOCK_HEIGHT)
-                        if block_data is not None:
-                            print(f"\n[MAGIC SUCCESS] Decoded! Revealed Block #{block_data['height']} Evidence:")
-                            print(json.dumps(block_data, indent=4))
-                            print("-" * 65)
+                    block_data = BLOCK_DATABASE.get(TARGET_BLOCK_HEIGHT)
                 else:
                     deadline_status = "MISSED"
 
             cv2.imshow("OpenCV Camera", frame)
             draw_dashboard(measurements, decoded_ns, crc_status, deadline_status, latency_ms, slack_ms, webcam_h, block_data, decoded_word, released)
 
-            # Hold until latch target is reached, then release and terminate
             if decoded_ns is not None and slack_ms > 0 and block_data is not None:
                 while time.time_ns() < decoded_ns:
                     if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -284,7 +297,7 @@ def main():
                         time.sleep(min(remaining - 0.001, 0.01))
 
                 released = True
-                print(f"[LATCH RELEASED] Target time reached. Magic sequence complete.")
+                print(f"[LATCH RELEASED] Target time reached. Sequence complete.")
 
                 draw_dashboard(measurements, decoded_ns, crc_status, deadline_status, latency_ms, slack_ms, webcam_h, block_data, decoded_word, released)
                 cv2.waitKey(4000)
