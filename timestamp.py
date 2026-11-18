@@ -22,7 +22,7 @@ LAMBDA_BASE = 10000.0
 SIGMA_C = 0.005
 TILT = 0.25
 
-LEAD_NS = 1_000_000_000  # 1 second lead time (scaled for demo)
+LEAD_NS = 1_000_000_000_0  # 1 second lead time (scaled for demo)
 MINUTE_MS = 60000
 
 rng = np.random.default_rng()
@@ -147,7 +147,7 @@ def main():
     missed = 0
     latencies = []
 
-    latched_target_ns = None
+    latched_target_ns = 0
 
     try:
         print("\n[RUNNING] Starting 50 transmission cycles...\n")
@@ -155,8 +155,7 @@ def main():
         for cycle in range(1, 51):
             start_ns = time.time_ns()
 
-            if latched_target_ns is None or start_ns >= latched_target_ns:
-                latched_target_ns = start_ns + LEAD_NS
+           
 
             # Acquire frame or generate synthetic entropy
             if camera is not None:
@@ -209,7 +208,10 @@ def main():
                 print(f"[ERROR {cycle:03d}] CRC mismatch. Frame rejected.")
 
             time.sleep(0.05)  # Throttle simulation step
+            beta_ns = time.time_ns()
 
+            if latched_target_ns is not None or beta_ns >= latched_target_ns:
+                latched_target_ns = beta_ns + LEAD_NS
     except KeyboardInterrupt:
         print("\n[STOP] Simulation interrupted by user.")
 
