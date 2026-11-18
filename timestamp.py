@@ -207,8 +207,8 @@ def main():
                 missed += 1
                 print(f"[ERROR {cycle:03d}] CRC mismatch. Frame rejected.")
 
-            beta_ns = time.time_ns()
             time.sleep(10.05)  # Throttle simulation step
+            beta_ns = time.time_ns()
 
             if latched_target_ns is not None or beta_ns >= latched_target_ns:
                 latched_target_ns = beta_ns + LEAD_NS
