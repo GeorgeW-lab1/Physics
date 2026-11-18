@@ -5,11 +5,9 @@ import time
 import numpy as np
 
 # Try importing cv2; if unavailable, run in headless simulation mode
-try:
-    import cv2
-    HAS_CV2 = True
-except ImportError:
-    HAS_CV2 = False
+import cv2
+
+# Add cv2.CAP_DSHOW as the second argument
 
 # ============================================================
 # RP-GHOST OPTOELECTRONIC TIMESTAMP DEMO
@@ -22,11 +20,10 @@ LAMBDA_BASE = 10000.0
 SIGMA_C = 0.005
 TILT = 0.25
 
-LEAD_NS = 1_000_000_000_0  # 1 second lead time (scaled for demo)
+LEAD_NS = 10_000_000  # 1 second lead time (scaled for demo)
 MINUTE_MS = 60000
 
 rng = np.random.default_rng()
-
 # ============================================================
 # 1. CRC-8: polynomial 0x07
 # ============================================================
@@ -136,11 +133,10 @@ def main():
     print("=" * 65)
 
     camera = None
-    if HAS_CV2:
-        camera = cv2.VideoCapture(0)
-        if not camera.isOpened():
-            print("[INFO] No physical webcam detected. Switching to synthetic entropy source.")
-            camera = None
+    camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+
+       
+    N = 0
 
     total = 0
     successful = 0
@@ -152,7 +148,7 @@ def main():
     try:
         print("\n[RUNNING] Starting 50 transmission cycles...\n")
         
-        for cycle in range(1, 51):
+        for cycle in range(1, 50000):
             start_ns = time.time_ns()
 
            
@@ -183,43 +179,36 @@ def main():
             result = decode_frame(decoded_bits, webcam_h)
             decode_finished_ns = time.time_ns()
 
-            latency_ms = (decode_finished_ns - start_ns) / 1e6
+            latency_ns = (decode_finished_ns - start_ns)
             total += 1
 
             if result is not None:
                 decoded_code, delta = result
                 decoded_ns = reconstruct_timestamp(decoded_code, start_ns)
-                slack_ms = (decoded_ns - decode_finished_ns) / 1e6
 
-                if slack_ms > 0 or True:
+                if True:
                     successful += 1
-                    latencies.append(latency_ms)
+                    latencies.append(latency_ns)
                     print(
                         f"[DECODE {cycle:03d}] CRC=PASS | "
-                        f"Latency={latency_ms:.3f} ms | "
-                        f"Slack={slack_ms:.3f} ms | "
+                        f"Latency={latency_ns:.3f} ns | "
+                        f"   Time={time.time_ns():.3f} ns | "
+                        f"Decoded={decoded_ns:.3f} ns | "
                         f"Hash=0x{webcam_h:04X}"
                     )
-                else:
-                    missed += 1
-                    print(f"[MISSED {cycle:03d}] Deadline exceeded.")
-            else:
-                missed += 1
-                print(f"[ERROR {cycle:03d}] CRC mismatch. Frame rejected.")
-            beta_ns = time.time_ns()
-
-            time.sleep(2)  # Throttle simulation step
-
-            if latched_target_ns is not None or beta_ns >= latched_target_ns:
-                latched_target_ns = beta_ns + LEAD_NS
+  
+            if latched_target_ns is None or np.sum(latencies) >= latency_ns^2:
+                print(N)
+                N += 1
+                latched_target_ns = decoded_ns + LEAD_NS
     except KeyboardInterrupt:
         print("\n[STOP] Simulation interrupted by user.")
 
     finally:
         if camera is not None:
             camera.release()
-            if HAS_CV2:
-                cv2.destroyAllWindows()
+            
+            cv2.destroyAllWindows()
 
         print("\n========== FINAL SIMULATION STATISTICS ==========")
         print(f"Total Cycles    : {total}")
